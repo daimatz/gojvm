@@ -10,10 +10,14 @@ import (
 	"github.com/daimatz/gojvm/pkg/native"
 )
 
+// maxFrameDepth is the maximum number of nested method calls.
+const maxFrameDepth = 1024
+
 // VM is the virtual machine that executes Java bytecode.
 type VM struct {
-	ClassFile *classfile.ClassFile
-	Stdout    io.Writer
+	ClassFile  *classfile.ClassFile
+	Stdout     io.Writer
+	frameDepth int
 }
 
 // NewVM creates a new VM with the given class file.
@@ -45,6 +49,12 @@ func (vm *VM) executeMethod(method *classfile.MethodInfo, args []Value) (Value, 
 	if method.Code == nil {
 		return Value{}, fmt.Errorf("method %s has no Code attribute", method.Name)
 	}
+
+	vm.frameDepth++
+	if vm.frameDepth > maxFrameDepth {
+		return Value{}, fmt.Errorf("stack overflow: frame depth exceeded %d", maxFrameDepth)
+	}
+	defer func() { vm.frameDepth-- }()
 
 	frame := NewFrame(method.Code.MaxLocals, method.Code.MaxStack, method.Code.Code, vm.ClassFile)
 
@@ -187,7 +197,10 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 	}
 
 	// Count parameters from descriptor
-	paramCount := countParams(methodRef.Descriptor)
+	paramCount, err := countParams(methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokestatic: %w", err)
+	}
 
 	// Pop arguments from stack (in reverse order)
 	args := make([]Value, paramCount)
@@ -225,12 +238,12 @@ func (vm *VM) executeNew(frame *Frame) (Value, bool, error) {
 }
 
 // countParams counts the number of parameters in a method descriptor.
-func countParams(descriptor string) int {
+func countParams(descriptor string) (int, error) {
 	// Parse between ( and )
 	start := strings.Index(descriptor, "(")
 	end := strings.Index(descriptor, ")")
 	if start == -1 || end == -1 {
-		return 0
+		return 0, fmt.Errorf("invalid method descriptor: %s", descriptor)
 	}
 
 	params := descriptor[start+1 : end]
@@ -263,10 +276,10 @@ func countParams(descriptor string) int {
 			}
 			count++
 		default:
-			i++
+			return 0, fmt.Errorf("invalid type descriptor char '%c' in %s", params[i], descriptor)
 		}
 	}
-	return count
+	return count, nil
 }
 
 // isVoidReturn checks if a method descriptor has void return type.

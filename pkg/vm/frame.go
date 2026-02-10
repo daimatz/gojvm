@@ -1,6 +1,10 @@
 package vm
 
-import "github.com/daimatz/gojvm/pkg/classfile"
+import (
+	"fmt"
+
+	"github.com/daimatz/gojvm/pkg/classfile"
+)
 
 // ValueType represents the type of a Value on the stack or in local variables.
 type ValueType int
@@ -57,23 +61,35 @@ func NewFrame(maxLocals, maxStack uint16, code []byte, class *classfile.ClassFil
 
 // Push pushes a value onto the operand stack.
 func (f *Frame) Push(v Value) {
+	if f.SP >= len(f.OperandStack) {
+		panic(fmt.Sprintf("operand stack overflow: SP=%d, max=%d", f.SP, len(f.OperandStack)))
+	}
 	f.OperandStack[f.SP] = v
 	f.SP++
 }
 
 // Pop pops a value from the operand stack.
 func (f *Frame) Pop() Value {
+	if f.SP <= 0 {
+		panic("operand stack underflow: SP=0")
+	}
 	f.SP--
 	return f.OperandStack[f.SP]
 }
 
 // GetLocal returns the value at the given local variable index.
 func (f *Frame) GetLocal(index int) Value {
+	if index < 0 || index >= len(f.LocalVars) {
+		panic(fmt.Sprintf("local variable index out of range: index=%d, max=%d", index, len(f.LocalVars)))
+	}
 	return f.LocalVars[index]
 }
 
 // SetLocal sets the value at the given local variable index.
 func (f *Frame) SetLocal(index int, v Value) {
+	if index < 0 || index >= len(f.LocalVars) {
+		panic(fmt.Sprintf("local variable index out of range: index=%d, max=%d", index, len(f.LocalVars)))
+	}
 	f.LocalVars[index] = v
 }
 

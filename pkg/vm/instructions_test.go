@@ -256,6 +256,205 @@ func TestStackOps(t *testing.T) {
 	})
 }
 
+func TestSipush(t *testing.T) {
+	tests := []struct {
+		name string
+		hi   byte
+		lo   byte
+		want int32
+	}{
+		{"positive", 0x01, 0x00, 256},
+		{"negative", 0xFF, 0x00, -256},
+		{"zero", 0x00, 0x00, 0},
+		{"max_short", 0x7F, 0xFF, 32767},
+		{"min_short", 0x80, 0x00, -32768},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := []byte{0x11, tt.hi, tt.lo, 0xAC} // sipush hi lo, ireturn
+			got := executeAndGetInt(t, code)
+			if got != tt.want {
+				t.Errorf("sipush %d: got %d, want %d", tt.want, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDivisionByZero(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	t.Run("idiv by zero", func(t *testing.T) {
+		// iconst_5, iconst_0, idiv, ireturn
+		code := []byte{0x08, 0x03, 0x6C, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+
+		var err error
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			_, hasReturn, e := v.executeInstruction(frame, opcode)
+			if e != nil {
+				err = e
+				break
+			}
+			if hasReturn {
+				break
+			}
+		}
+
+		if err == nil {
+			t.Fatal("expected ArithmeticException for idiv by zero, got nil")
+		}
+		if got := err.Error(); got != "ArithmeticException: / by zero" {
+			t.Errorf("error message: got %q, want %q", got, "ArithmeticException: / by zero")
+		}
+	})
+
+	t.Run("irem by zero", func(t *testing.T) {
+		// iconst_5, iconst_0, irem, ireturn
+		code := []byte{0x08, 0x03, 0x70, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+
+		var err error
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			_, hasReturn, e := v.executeInstruction(frame, opcode)
+			if e != nil {
+				err = e
+				break
+			}
+			if hasReturn {
+				break
+			}
+		}
+
+		if err == nil {
+			t.Fatal("expected ArithmeticException for irem by zero, got nil")
+		}
+	})
+}
+
+func TestOverflow(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   []byte
+		want   int32
+		locals []int32
+	}{
+		{
+			name: "iadd overflow wraps",
+			// bipush 127 is max we can push with bipush; use locals for larger values
+			// iload_0, iload_1, iadd, ireturn
+			code:   []byte{0x1A, 0x1B, 0x60, 0xAC},
+			locals: []int32{2147483647, 1}, // MaxInt32 + 1
+			want:   -2147483648,            // wraps to MinInt32
+		},
+		{
+			name:   "isub underflow wraps",
+			code:   []byte{0x1A, 0x1B, 0x64, 0xAC},
+			locals: []int32{-2147483648, 1}, // MinInt32 - 1
+			want:   2147483647,              // wraps to MaxInt32
+		},
+		{
+			name:   "imul overflow wraps",
+			code:   []byte{0x1A, 0x1B, 0x68, 0xAC},
+			locals: []int32{2147483647, 2},
+			want:   -2,
+		},
+		{
+			name:   "ineg MinInt32 stays MinInt32",
+			code:   []byte{0x1A, 0x74, 0xAC},
+			locals: []int32{-2147483648},
+			want:   -2147483648, // -MinInt32 overflows back to MinInt32
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := executeAndGetInt(t, tt.code, tt.locals...)
+			if got != tt.want {
+				t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIfIcmp(t *testing.T) {
+	// Helper: builds bytecode for if_icmpXX where the two values come from locals
+	// iload_0, iload_1, if_icmpXX(offset=5, target=7), iconst_0, ireturn, iconst_1, ireturn
+	buildCode := func(opcode byte) []byte {
+		return []byte{0x1A, 0x1B, opcode, 0x00, 0x05, 0x03, 0xAC, 0x04, 0xAC}
+	}
+
+	tests := []struct {
+		name   string
+		opcode byte
+		a, b   int32
+		want   int32 // 1=taken, 0=not taken
+	}{
+		{"if_icmpeq taken", 0x9F, 5, 5, 1},
+		{"if_icmpeq not taken", 0x9F, 5, 3, 0},
+		{"if_icmpne taken", 0xA0, 5, 3, 1},
+		{"if_icmpne not taken", 0xA0, 5, 5, 0},
+		{"if_icmplt taken", 0xA1, 3, 5, 1},
+		{"if_icmplt not taken", 0xA1, 5, 3, 0},
+		{"if_icmpge taken (>)", 0xA2, 5, 3, 1},
+		{"if_icmpge taken (=)", 0xA2, 5, 5, 1},
+		{"if_icmpge not taken", 0xA2, 3, 5, 0},
+		{"if_icmpgt taken", 0xA3, 5, 3, 1},
+		{"if_icmpgt not taken (=)", 0xA3, 5, 5, 0},
+		{"if_icmple taken (<)", 0xA4, 3, 5, 1},
+		{"if_icmple taken (=)", 0xA4, 5, 5, 1},
+		{"if_icmple not taken", 0xA4, 5, 3, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := buildCode(tt.opcode)
+			got := executeAndGetInt(t, code, tt.a, tt.b)
+			if got != tt.want {
+				t.Errorf("%s (%d vs %d): got %d, want %d", tt.name, tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemainingBranches(t *testing.T) {
+	// Tests for ifge, ifgt, ifle that aren't covered by TestBranch
+	// Bytecode: iload_0, ifXX(offset=5, target=5), iconst_0, ireturn, iconst_1, ireturn
+	buildCode := func(opcode byte) []byte {
+		return []byte{0x1A, opcode, 0x00, 0x05, 0x03, 0xAC, 0x04, 0xAC}
+	}
+
+	tests := []struct {
+		name   string
+		opcode byte
+		val    int32
+		want   int32 // 1=taken, 0=not taken
+	}{
+		{"ifge taken (positive)", 0x9C, 5, 1},
+		{"ifge taken (zero)", 0x9C, 0, 1},
+		{"ifge not taken (negative)", 0x9C, -1, 0},
+		{"ifgt taken", 0x9D, 5, 1},
+		{"ifgt not taken (zero)", 0x9D, 0, 0},
+		{"ifgt not taken (negative)", 0x9D, -1, 0},
+		{"ifle taken (negative)", 0x9E, -1, 1},
+		{"ifle taken (zero)", 0x9E, 0, 1},
+		{"ifle not taken (positive)", 0x9E, 5, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := executeAndGetInt(t, buildCode(tt.opcode), tt.val)
+			if got != tt.want {
+				t.Errorf("%s (val=%d): got %d, want %d", tt.name, tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLocalVarInstructions(t *testing.T) {
 	t.Run("istore and iload", func(t *testing.T) {
 		// iconst_5, istore_0, iload_0, ireturn -> store 5, load 5, return 5

@@ -146,6 +146,9 @@ func ResolveMethodref(pool []ConstantPoolEntry, index uint16) (*MethodRefInfo, e
 		return nil, fmt.Errorf("resolving Methodref class: %w", err)
 	}
 
+	if int(mref.NameAndTypeIndex) >= len(pool) || pool[mref.NameAndTypeIndex] == nil {
+		return nil, fmt.Errorf("invalid NameAndType index %d", mref.NameAndTypeIndex)
+	}
 	nat, ok := pool[mref.NameAndTypeIndex].(*ConstantNameAndType)
 	if !ok {
 		return nil, fmt.Errorf("constant pool index %d is not NameAndType", mref.NameAndTypeIndex)
@@ -190,6 +193,9 @@ func ResolveFieldref(pool []ConstantPoolEntry, index uint16) (*FieldRefInfo, err
 		return nil, fmt.Errorf("resolving Fieldref class: %w", err)
 	}
 
+	if int(fref.NameAndTypeIndex) >= len(pool) || pool[fref.NameAndTypeIndex] == nil {
+		return nil, fmt.Errorf("invalid NameAndType index %d", fref.NameAndTypeIndex)
+	}
 	nat, ok := pool[fref.NameAndTypeIndex].(*ConstantNameAndType)
 	if !ok {
 		return nil, fmt.Errorf("constant pool index %d is not NameAndType", fref.NameAndTypeIndex)

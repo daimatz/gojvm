@@ -5,9 +5,6 @@ import (
 	"io"
 )
 
-// SystemOut is a placeholder object for java/lang/System.out.
-type SystemOut struct{}
-
 // PrintStream represents a java.io.PrintStream.
 type PrintStream struct {
 	Writer io.Writer

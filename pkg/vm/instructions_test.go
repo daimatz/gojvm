@@ -3,6 +3,9 @@ package vm
 import (
 	"io"
 	"testing"
+
+	"github.com/daimatz/gojvm/pkg/classfile"
+	"github.com/daimatz/gojvm/pkg/native"
 )
 
 // executeAndGetInt creates a Frame with the given bytecodes, runs the execution
@@ -453,6 +456,301 @@ func TestRemainingBranches(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIfnull(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	// Bytecode layout:
+	// Byte 0: aload_0       (0x2A)
+	// Byte 1: ifnull        (0xC6) branchPC=1, offset=5, target=6
+	// Byte 2: 0x00
+	// Byte 3: 0x05
+	// Byte 4: iconst_1      (0x04)  -- not taken (non-null)
+	// Byte 5: ireturn       (0xAC)
+	// Byte 6: iconst_2      (0x05)  -- taken (null)
+	// Byte 7: ireturn       (0xAC)
+
+	t.Run("taken (null value)", func(t *testing.T) {
+		code := []byte{0x2A, 0xC6, 0x00, 0x05, 0x04, 0xAC, 0x05, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, NullValue())
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 2 {
+					t.Errorf("ifnull taken: got %d, want 2", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("not taken (non-null value)", func(t *testing.T) {
+		code := []byte{0x2A, 0xC6, 0x00, 0x05, 0x04, 0xAC, 0x05, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, RefValue("some object"))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 1 {
+					t.Errorf("ifnull not taken: got %d, want 1", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestAreturn(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	t.Run("return object reference", func(t *testing.T) {
+		// aload_0, areturn (0xB0)
+		code := []byte{0x2A, 0xB0}
+		frame := NewFrame(4, 10, code, nil)
+		obj := "test-object"
+		frame.SetLocal(0, RefValue(obj))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Type != TypeRef {
+					t.Errorf("areturn: got type %v, want TypeRef", retVal.Type)
+				}
+				if retVal.Ref != obj {
+					t.Errorf("areturn: got ref %v, want %v", retVal.Ref, obj)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("return null reference", func(t *testing.T) {
+		// aconst_null, areturn
+		code := []byte{0x01, 0xB0}
+		frame := NewFrame(4, 10, code, nil)
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Type != TypeNull {
+					t.Errorf("areturn null: got type %v, want TypeNull", retVal.Type)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestGetfieldPutfield(t *testing.T) {
+	// Constant pool: Fieldref for "TestClass.x:I"
+	pool := make([]classfile.ConstantPoolEntry, 7)
+	pool[1] = &classfile.ConstantFieldref{ClassIndex: 2, NameAndTypeIndex: 3}
+	pool[2] = &classfile.ConstantClass{NameIndex: 4}
+	pool[3] = &classfile.ConstantNameAndType{NameIndex: 5, DescriptorIndex: 6}
+	pool[4] = &classfile.ConstantUtf8{Value: "TestClass"}
+	pool[5] = &classfile.ConstantUtf8{Value: "x"}
+	pool[6] = &classfile.ConstantUtf8{Value: "I"}
+	cf := &classfile.ClassFile{ConstantPool: pool}
+
+	t.Run("putfield then getfield returns stored value", func(t *testing.T) {
+		code := []byte{
+			0x2A,             // aload_0
+			0x10, 0x37,       // bipush 55
+			0xB5, 0x00, 0x01, // putfield #1
+			0x2A,             // aload_0
+			0xB4, 0x00, 0x01, // getfield #1
+			0xAC,             // ireturn
+		}
+
+		frame := NewFrame(4, 10, code, cf)
+		obj := &JObject{ClassName: "TestClass", Fields: make(map[string]Value)}
+		frame.SetLocal(0, RefValue(obj))
+
+		v := &VM{Stdout: io.Discard}
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 55 {
+					t.Errorf("getfield after putfield: got %d, want 55", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("getfield on unset field returns null", func(t *testing.T) {
+		code := []byte{
+			0x2A,             // aload_0
+			0xB4, 0x00, 0x01, // getfield #1
+			0xB0,             // areturn
+		}
+
+		frame := NewFrame(4, 10, code, cf)
+		obj := &JObject{ClassName: "TestClass", Fields: make(map[string]Value)}
+		frame.SetLocal(0, RefValue(obj))
+
+		v := &VM{Stdout: io.Discard}
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Type != TypeNull {
+					t.Errorf("getfield on unset field: got type %v, want TypeNull", retVal.Type)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestInvokespecialObjectInit(t *testing.T) {
+	// Constant pool: Methodref for java/lang/Object.<init>:()V
+	pool := make([]classfile.ConstantPoolEntry, 7)
+	pool[1] = &classfile.ConstantMethodref{ClassIndex: 2, NameAndTypeIndex: 3}
+	pool[2] = &classfile.ConstantClass{NameIndex: 4}
+	pool[3] = &classfile.ConstantNameAndType{NameIndex: 5, DescriptorIndex: 6}
+	pool[4] = &classfile.ConstantUtf8{Value: "java/lang/Object"}
+	pool[5] = &classfile.ConstantUtf8{Value: "<init>"}
+	pool[6] = &classfile.ConstantUtf8{Value: "()V"}
+	cf := &classfile.ClassFile{ConstantPool: pool}
+
+	t.Run("Object init is no-op", func(t *testing.T) {
+		code := []byte{
+			0x08,             // iconst_5 (marker)
+			0x2A,             // aload_0 (push object for invokespecial)
+			0xB7, 0x00, 0x01, // invokespecial #1 (Object.<init>)
+			0xAC,             // ireturn (returns marker 5)
+		}
+
+		frame := NewFrame(4, 10, code, cf)
+		obj := &JObject{ClassName: "TestClass", Fields: make(map[string]Value)}
+		frame.SetLocal(0, RefValue(obj))
+
+		v := &VM{Stdout: io.Discard}
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 5 {
+					t.Errorf("invokespecial Object.<init>: got %d, want 5 (marker)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestCheckcast(t *testing.T) {
+	// Constant pool with a Class entry (checkcast reads and discards it)
+	pool := make([]classfile.ConstantPoolEntry, 3)
+	pool[1] = &classfile.ConstantClass{NameIndex: 2}
+	pool[2] = &classfile.ConstantUtf8{Value: "SomeClass"}
+	cf := &classfile.ClassFile{ConstantPool: pool}
+
+	t.Run("checkcast passes through reference", func(t *testing.T) {
+		code := []byte{
+			0x2A,             // aload_0
+			0xC0, 0x00, 0x01, // checkcast #1
+			0xB0,             // areturn
+		}
+
+		frame := NewFrame(4, 10, code, cf)
+		obj := &JObject{ClassName: "SomeClass", Fields: make(map[string]Value)}
+		frame.SetLocal(0, RefValue(obj))
+
+		v := &VM{Stdout: io.Discard}
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Type != TypeRef {
+					t.Errorf("checkcast: got type %v, want TypeRef", retVal.Type)
+				}
+				if retVal.Ref != obj {
+					t.Errorf("checkcast: reference not preserved")
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestIfnullNonNullNativeInteger(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	// aload_0, ifnull(offset=5, target=6), iconst_1, ireturn, iconst_2, ireturn
+	code := []byte{0x2A, 0xC6, 0x00, 0x05, 0x04, 0xAC, 0x05, 0xAC}
+
+	t.Run("NativeInteger is non-null", func(t *testing.T) {
+		frame := NewFrame(4, 10, code, nil)
+		ni := native.IntegerValueOf(42)
+		frame.SetLocal(0, RefValue(ni))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 1 {
+					t.Errorf("ifnull with NativeInteger: got %d, want 1 (not taken)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
 }
 
 func TestLocalVarInstructions(t *testing.T) {

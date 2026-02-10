@@ -124,6 +124,58 @@ func (vm *VM) executeGetstatic(frame *Frame) (Value, bool, error) {
 	return Value{}, false, fmt.Errorf("getstatic: unsupported field %s.%s:%s", fieldRef.ClassName, fieldRef.FieldName, fieldRef.Descriptor)
 }
 
+// executeGetfield handles the getfield instruction.
+func (vm *VM) executeGetfield(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	pool := frame.Class.ConstantPool
+
+	fieldRef, err := classfile.ResolveFieldref(pool, index)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("getfield: %w", err)
+	}
+
+	objectRef := frame.Pop()
+	if objectRef.Type == TypeNull || objectRef.Ref == nil {
+		return Value{}, false, fmt.Errorf("getfield: NullPointerException")
+	}
+	obj, ok := objectRef.Ref.(*JObject)
+	if !ok {
+		return Value{}, false, fmt.Errorf("getfield: receiver is not a JObject")
+	}
+
+	val, exists := obj.Fields[fieldRef.FieldName]
+	if !exists {
+		frame.Push(NullValue())
+	} else {
+		frame.Push(val)
+	}
+	return Value{}, false, nil
+}
+
+// executePutfield handles the putfield instruction.
+func (vm *VM) executePutfield(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	pool := frame.Class.ConstantPool
+
+	fieldRef, err := classfile.ResolveFieldref(pool, index)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("putfield: %w", err)
+	}
+
+	value := frame.Pop()
+	objectRef := frame.Pop()
+	if objectRef.Type == TypeNull || objectRef.Ref == nil {
+		return Value{}, false, fmt.Errorf("putfield: NullPointerException")
+	}
+	obj, ok := objectRef.Ref.(*JObject)
+	if !ok {
+		return Value{}, false, fmt.Errorf("putfield: receiver is not a JObject")
+	}
+
+	obj.Fields[fieldRef.FieldName] = value
+	return Value{}, false, nil
+}
+
 // executeInvokevirtual handles the invokevirtual instruction.
 func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 	index := frame.ReadU16()
@@ -134,44 +186,135 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokevirtual: %w", err)
 	}
 
-	// Handle PrintStream.println
+	paramCount, err := countParams(methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokevirtual: %w", err)
+	}
+
+	args := make([]Value, paramCount)
+	for i := paramCount - 1; i >= 0; i-- {
+		args[i] = frame.Pop()
+	}
+	objectRef := frame.Pop()
+
+	// PrintStream.println
 	if methodRef.ClassName == "java/io/PrintStream" && methodRef.MethodName == "println" {
-		return vm.invokePrintln(frame, methodRef.Descriptor)
+		ps, ok := objectRef.Ref.(*native.PrintStream)
+		if !ok {
+			return Value{}, false, fmt.Errorf("invokevirtual: println receiver is not a PrintStream")
+		}
+		switch methodRef.Descriptor {
+		case "(I)V":
+			ps.Println(args[0].Int)
+		case "(Ljava/lang/String;)V":
+			ps.Println(args[0].Ref)
+		case "()V":
+			ps.Println()
+		default:
+			return Value{}, false, fmt.Errorf("invokevirtual: unsupported println descriptor %s", methodRef.Descriptor)
+		}
+		return Value{}, false, nil
+	}
+
+	// HashMap.get
+	if methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "get" {
+		hm, ok := objectRef.Ref.(*native.NativeHashMap)
+		if !ok {
+			return Value{}, false, fmt.Errorf("invokevirtual: HashMap.get receiver is not a NativeHashMap")
+		}
+		result := hm.Get(args[0].Ref)
+		if result == nil {
+			frame.Push(NullValue())
+		} else {
+			frame.Push(RefValue(result))
+		}
+		return Value{}, false, nil
+	}
+
+	// HashMap.put
+	if methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "put" {
+		hm, ok := objectRef.Ref.(*native.NativeHashMap)
+		if !ok {
+			return Value{}, false, fmt.Errorf("invokevirtual: HashMap.put receiver is not a NativeHashMap")
+		}
+		old := hm.Put(args[0].Ref, args[1].Ref)
+		if old == nil {
+			frame.Push(NullValue())
+		} else {
+			frame.Push(RefValue(old))
+		}
+		return Value{}, false, nil
+	}
+
+	// Integer.intValue
+	if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "intValue" {
+		ni, ok := objectRef.Ref.(*native.NativeInteger)
+		if !ok {
+			return Value{}, false, fmt.Errorf("invokevirtual: Integer.intValue receiver is not a NativeInteger")
+		}
+		frame.Push(IntValue(ni.Value))
+		return Value{}, false, nil
+	}
+
+	// User-defined method (e.g., Fib.fib)
+	method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
+	if method != nil {
+		fullArgs := make([]Value, 0, len(args)+1)
+		fullArgs = append(fullArgs, objectRef)
+		fullArgs = append(fullArgs, args...)
+		retVal, err := vm.executeMethod(method, fullArgs)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
 	}
 
 	return Value{}, false, fmt.Errorf("invokevirtual: unsupported method %s.%s:%s", methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
 }
 
-// invokePrintln handles PrintStream.println with various descriptors.
-func (vm *VM) invokePrintln(frame *Frame, descriptor string) (Value, bool, error) {
-	switch descriptor {
-	case "(I)V":
-		arg := frame.Pop()
-		objectRef := frame.Pop()
-		ps, ok := objectRef.Ref.(*native.PrintStream)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: println receiver is not a PrintStream")
-		}
-		ps.Println(arg.Int)
-	case "(Ljava/lang/String;)V":
-		arg := frame.Pop()
-		objectRef := frame.Pop()
-		ps, ok := objectRef.Ref.(*native.PrintStream)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: println receiver is not a PrintStream")
-		}
-		ps.Println(arg.Ref)
-	case "()V":
-		objectRef := frame.Pop()
-		ps, ok := objectRef.Ref.(*native.PrintStream)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: println receiver is not a PrintStream")
-		}
-		ps.Println()
-	default:
-		return Value{}, false, fmt.Errorf("invokevirtual: unsupported println descriptor %s", descriptor)
+// executeInvokespecial handles the invokespecial instruction.
+func (vm *VM) executeInvokespecial(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	pool := frame.Class.ConstantPool
+
+	methodRef, err := classfile.ResolveMethodref(pool, index)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokespecial: %w", err)
 	}
 
+	paramCount, err := countParams(methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokespecial: %w", err)
+	}
+
+	args := make([]Value, paramCount)
+	for i := paramCount - 1; i >= 0; i-- {
+		args[i] = frame.Pop()
+	}
+	objectRef := frame.Pop() // this
+
+	switch {
+	case methodRef.ClassName == "java/lang/Object" && methodRef.MethodName == "<init>":
+		// no-op
+	case methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "<init>":
+		// HashMap already initialized in new, no-op
+	default:
+		// User class constructor
+		method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
+		if method == nil {
+			return Value{}, false, fmt.Errorf("invokespecial: method %s:%s not found", methodRef.MethodName, methodRef.Descriptor)
+		}
+		fullArgs := make([]Value, 0, len(args)+1)
+		fullArgs = append(fullArgs, objectRef)
+		fullArgs = append(fullArgs, args...)
+		_, err = vm.executeMethod(method, fullArgs)
+		if err != nil {
+			return Value{}, false, err
+		}
+	}
 	return Value{}, false, nil
 }
 
@@ -185,12 +328,14 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokestatic: %w", err)
 	}
 
-	// Find the method in the current class
-	thisClassName, _ := frame.Class.ClassName()
-	if methodRef.ClassName != thisClassName {
-		return Value{}, false, fmt.Errorf("invokestatic: cross-class calls not supported (calling %s.%s from %s)", methodRef.ClassName, methodRef.MethodName, thisClassName)
+	// Native static methods
+	if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "valueOf" {
+		intVal := frame.Pop()
+		frame.Push(RefValue(native.IntegerValueOf(intVal.Int)))
+		return Value{}, false, nil
 	}
 
+	// Find the method in the current class
 	method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
 	if method == nil {
 		return Value{}, false, fmt.Errorf("invokestatic: method %s:%s not found in class %s", methodRef.MethodName, methodRef.Descriptor, methodRef.ClassName)
@@ -222,7 +367,7 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 	return Value{}, false, nil
 }
 
-// executeNew handles the new instruction (minimal for Milestone 1).
+// executeNew handles the new instruction.
 func (vm *VM) executeNew(frame *Frame) (Value, bool, error) {
 	index := frame.ReadU16()
 	pool := frame.Class.ConstantPool
@@ -232,8 +377,13 @@ func (vm *VM) executeNew(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("new: %w", err)
 	}
 
-	// For Milestone 1, just push a placeholder object
-	frame.Push(RefValue(className))
+	switch className {
+	case "java/util/HashMap":
+		frame.Push(RefValue(native.NewNativeHashMap()))
+	default:
+		obj := &JObject{ClassName: className, Fields: make(map[string]Value)}
+		frame.Push(RefValue(obj))
+	}
 	return Value{}, false, nil
 }
 

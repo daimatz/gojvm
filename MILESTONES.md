@@ -389,6 +389,173 @@ $ gojvm Hello.class
 
 ---
 
+## Milestone 1.5: Fib.java対応 — オブジェクト生成・フィールドアクセス・ネイティブクラス
+
+**目標**: メモ化フィボナッチ (`Fib.class`) を実行できるようにする。オブジェクト生成、インスタンスフィールド、コンストラクタ呼び出し、HashMap/Integer のネイティブ実装を追加する。
+
+**検証用Javaコード**:
+```java
+import java.util.HashMap;
+class Fib {
+  private HashMap<Integer, Integer> cache;
+  public Fib() {
+    cache = new HashMap<>();
+    cache.put(0, 1);
+    cache.put(1, 1);
+  }
+  public int fib(int n) {
+    Integer got = cache.get(n);
+    if (got != null) { return got; }
+    Integer value = fib(n-1) + fib(n-2);
+    cache.put(n, value);
+    return value;
+  }
+  public static void main(String[] args) {
+    System.out.println(new Fib().fib(10));
+  }
+}
+```
+
+**期待出力**: `89`
+
+**実行フロー**: main → `new Fib` → `Fib.<init>` (HashMap生成、cache.put(0,1), cache.put(1,1)) → `fib(10)` → 再帰的に fib(9)...fib(2) → 結果 89 → println
+
+### 1.5.1 新規オペコード
+
+| Opcode | Hex  | ニーモニック    | オペランド               | 動作                                                  |
+|--------|------|--------------|------------------------|------------------------------------------------------|
+| 176    | 0xB0 | areturn      | なし                    | オブジェクト参照をpopして呼び出し元に返す                   |
+| 180    | 0xB4 | getfield     | indexbyte1,2 (u16)     | objectref をpop、CP[index] の Fieldref からフィールド名を解決し、フィールド値をpush |
+| 181    | 0xB5 | putfield     | indexbyte1,2 (u16)     | value, objectref をpop、CP[index] の Fieldref からフィールド名を解決し、objectref のフィールドに value を設定 |
+| 183    | 0xB7 | invokespecial| indexbyte1,2 (u16)     | コンストラクタ (`<init>`) / super メソッド呼び出し         |
+| 192    | 0xC0 | checkcast    | indexbyte1,2 (u16)     | 型キャスト検査。Milestone 1.5 では **no-op** (objectref をそのまま残す) |
+| 198    | 0xC6 | ifnull       | branchbyte1,2 (i16)    | objectref をpop、null なら分岐 (分岐先 = 命令のPC + オフセット) |
+
+### 1.5.2 オブジェクトモデル
+
+**新規ファイル**: `pkg/vm/object.go`
+
+```go
+type JObject struct {
+    ClassName string
+    Fields    map[string]Value  // フィールド名 → 値
+}
+```
+
+- `new` 命令で `JObject` を生成してスタックにpush
+- `putfield` / `getfield` で `JObject.Fields` に対して読み書き
+- ネイティブクラス (`HashMap`, `Integer`) の場合は専用の型を使用（後述）
+
+### 1.5.3 `new` 命令の拡張
+
+Milestone 1 の `new` はプレースホルダーだったが、Milestone 1.5 では以下のように動作を分岐する:
+
+| クラス名               | 生成するオブジェクト          |
+|----------------------|---------------------------|
+| `java/util/HashMap`  | `NativeHashMap` (Go map)  |
+| ユーザークラス (例: `Fib`) | `JObject{ClassName, Fields}` |
+
+### 1.5.4 ネイティブクラス実装
+
+#### NativeHashMap (`pkg/native/hashmap.go`)
+
+```go
+type NativeHashMap struct {
+    Data map[interface{}]interface{}
+}
+```
+
+ネイティブメソッド:
+| メソッド | シグネチャ | 実装 |
+|---------|----------|------|
+| `java/util/HashMap.<init>` | `()V` | `Data = make(map[interface{}]interface{})` |
+| `java/util/HashMap.get` | `(Ljava/lang/Object;)Ljava/lang/Object;` | map lookup。キーが存在しなければ null を返す |
+| `java/util/HashMap.put` | `(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;` | map put。前の値を返す (なければ null) |
+
+**注意**: HashMap のキーは `Integer` オブジェクトなので、キー比較時に `NativeInteger.Value` を使って比較する必要がある。
+
+#### NativeInteger (`pkg/native/integer.go`)
+
+```go
+type NativeInteger struct {
+    Value int32
+}
+```
+
+ネイティブメソッド:
+| メソッド | シグネチャ | 実装 |
+|---------|----------|------|
+| `java/lang/Integer.valueOf` | `(I)Ljava/lang/Integer;` | int → `NativeInteger` (ボクシング) |
+| `java/lang/Integer.intValue` | `()I` | `NativeInteger` → int (アンボクシング) |
+
+#### Object (`pkg/native/system.go` に追記)
+
+| メソッド | シグネチャ | 実装 |
+|---------|----------|------|
+| `java/lang/Object.<init>` | `()V` | no-op (何もしない) |
+
+### 1.5.5 invokespecial の実装
+
+`invokespecial` は CP[index] の Methodref を解決し、以下のように分岐する:
+
+1. **ネイティブコンストラクタ** (クラスが `java/lang/Object`, `java/util/HashMap` 等):
+   - ネイティブメソッドテーブルから対応する Go 関数を呼ぶ
+2. **ユーザークラスのコンストラクタ** (例: `Fib.<init>`):
+   - 対象クラスの `.class` ファイルから `<init>` メソッドを探す
+   - 新しいフレームを作成して実行 (引数の先頭 = `this` 参照)
+
+**引数の取り方**: ディスクリプタから引数の数を数え、スタックから `[objectref, arg1, arg2, ...]` をpop。`objectref` が `this` としてローカル変数 0 に入る。
+
+### 1.5.6 invokevirtual / invokestatic の汎用化
+
+**invokevirtual**:
+- Milestone 1 では `PrintStream.println` のみ対応していた
+- Milestone 1.5 では、レシーバーの型に応じてディスパッチを汎用化:
+  1. `PrintStream.println` → 既存のネイティブ実装
+  2. `HashMap.get` / `HashMap.put` → ネイティブ実装
+  3. `Integer.intValue` → ネイティブ実装
+  4. ユーザークラスのメソッド (例: `Fib.fib`) → 対象クラスの `.class` ファイルからメソッドを探して実行
+
+**invokestatic**:
+- Milestone 1 では同一クラス内のstaticメソッドのみ対応していた
+- Milestone 1.5 では、呼び出し先クラスに応じて分岐:
+  1. `Integer.valueOf` → ネイティブ実装
+  2. ユーザークラスのstaticメソッド → 対象クラスの `.class` ファイルから探して実行
+
+### 1.5.7 複数クラスファイルの読み込み
+
+`Fib.java` は `main` から `new Fib()` → `Fib.<init>()` → `fib()` を呼ぶため、`Fib.class` 1ファイルで完結する。ただし、VM は既に `ClassFiles map[string]*ClassFile` を持っているため、将来のクロスクラス対応への基盤は整っている。
+
+### 1.5.8 実装順序（推奨）
+
+1. `pkg/vm/object.go` — `JObject` 型の定義
+2. `pkg/native/integer.go` — `NativeInteger` + `valueOf` / `intValue`
+3. `pkg/native/hashmap.go` — `NativeHashMap` + `<init>` / `get` / `put`
+4. `pkg/native/system.go` — `Object.<init>` の no-op を追加
+5. `pkg/vm/instructions.go` — 新規オペコード追加:
+   - `areturn` (0xB0)
+   - `getfield` (0xB4)
+   - `putfield` (0xB5)
+   - `invokespecial` (0xB7)
+   - `checkcast` (0xC0, no-op)
+   - `ifnull` (0xC6)
+6. `new` 命令の拡張 — クラス名に応じたオブジェクト生成の分岐
+7. `invokevirtual` の汎用化 — ネイティブ/ユーザーメソッドのディスパッチ
+8. `invokestatic` の汎用化 — `Integer.valueOf` 等の対応
+9. `invokespecial` — コンストラクタ呼び出し (ネイティブ/ユーザークラス)
+10. 統合テスト — `testdata/Fib.class` で出力 `89` を検証
+
+### 1.5.9 テスト戦略
+
+- **ユニットテスト**:
+  - `NativeHashMap` の get/put 動作
+  - `NativeInteger` の valueOf/intValue 動作
+  - `JObject` のフィールド読み書き
+  - 各新規オペコードの個別テスト
+- **統合テスト**: `testdata/Fib.class` を gojvm で実行し、出力が `89` であることを検証
+
+---
+
 ## Milestone 2: 配列・文字列操作・例外処理
 
 ### 概要

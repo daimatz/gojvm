@@ -1,128 +1,132 @@
-# Code Review - Milestone 1
+# Code Review - Milestone 1.5 (Fib.java対応)
 
 ## Summary
 
-全体的に品質の高い実装。JVM仕様への準拠性は良好で、classファイルパーサー、バイトコード命令セット、実行エンジンの基本構造が正しく実装されている。テストも全てパスしている。主要な懸念点は、コンスタントプール解決時の境界チェック不足（パニックの可能性）と、テストカバレッジの一部不足。
+Milestone 1.5の実装は全体的に良質。JVM仕様に対する準拠性が高く、`Fib.java`（メモ化フィボナッチ）を正しく実行できる。JObject、NativeHashMap、NativeIntegerの設計はシンプルで目的に合っている。主な懸念点は `invokevirtual` 内のネイティブメソッド呼び出しにおける安全でない型アサーション（panicの可能性）と、`invokespecial` でメソッドが見つからない場合のサイレント失敗。テストは統合テスト（TestFib）が正しく89を検証しているが、新規オペコードの個別ユニットテストが不足している。
 
 ---
 
 ## Critical Issues（修正必須）
 
-### [C1] ResolveMethodref/ResolveFieldref の NameAndTypeIndex に対する境界チェック不足
-
-- **ファイル**: pkg/classfile/constant_pool.go:149, :195
-- **問題**: `ResolveMethodref` で `pool[mref.NameAndTypeIndex]` にアクセスする際、インデックスの境界チェックが行われていない。`ResolveFieldref` も同様（行195）。不正な classfile を読んだ場合、panic (index out of range) が発生する。
-  ```go
-  // 行149: 境界チェックなし
-  nat, ok := pool[mref.NameAndTypeIndex].(*ConstantNameAndType)
-  ```
-  一方、同じ関数内の `pool[index]` アクセス（行136-138）では正しく境界チェックが行われている。
-- **修正案**: `GetUtf8` や `GetClassName` と同様に、アクセス前にインデックスの範囲と nil チェックを追加する。
-  ```go
-  if int(mref.NameAndTypeIndex) >= len(pool) || pool[mref.NameAndTypeIndex] == nil {
-      return nil, fmt.Errorf("invalid NameAndType index %d", mref.NameAndTypeIndex)
-  }
-  ```
+なし。現在のFib.javaユースケースで不正な動作を引き起こす問題は確認されなかった。
 
 ---
 
 ## Major Issues（強く推奨）
 
-### [M1] Frame の Push/Pop に境界チェックがない
+### [M1] invokevirtual 内のネイティブメソッド呼び出しで安全でない型アサーション
 
-- **ファイル**: pkg/vm/frame.go:59-68
-- **問題**: `Push` はスタックオーバーフロー、`Pop` はスタックアンダーフロー（SP < 0）のチェックがない。不正なバイトコードや実装バグにより、index out of range panic が発生する可能性がある。
+- **ファイル**: `pkg/vm/vm.go:215, 227, 239`
+- **問題**: HashMap.get、HashMap.put、Integer.intValue のネイティブ呼び出しで、comma-okパターンを使わない型アサーションを使用している。レシーバーがnullまたは想定外の型の場合、panicが発生する。
   ```go
-  func (f *Frame) Push(v Value) {
-      f.OperandStack[f.SP] = v  // SP >= len(OperandStack) で panic
-      f.SP++
-  }
-  func (f *Frame) Pop() Value {
-      f.SP--                     // SP < 0 になりうる
-      return f.OperandStack[f.SP]
+  // vm.go:215 — パニックの可能性
+  hm := objectRef.Ref.(*native.NativeHashMap)
+
+  // vm.go:227 — 同上
+  hm := objectRef.Ref.(*native.NativeHashMap)
+
+  // vm.go:239 — 同上
+  ni := objectRef.Ref.(*native.NativeInteger)
+  ```
+- **対比**: `getfield` / `putfield` では正しくcomma-okパターンが使われている（`vm.go:138, 165`）。
+- **修正案**: comma-okパターンに統一する。
+  ```go
+  hm, ok := objectRef.Ref.(*native.NativeHashMap)
+  if !ok {
+      return Value{}, false, fmt.Errorf("invokevirtual: HashMap.get receiver is not a NativeHashMap")
   }
   ```
-- **修正案**: 少なくともデバッグ用にパニック前の境界チェックを追加して、意味のあるエラーメッセージを出す。または error を返す設計に変更する（ただし、パフォーマンスとのトレードオフがある）。
 
-### [M2] sipush 命令のテストが存在しない
+### [M2] invokespecial でユーザークラスメソッドが見つからない場合のサイレント失敗
 
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: `sipush` (0x11) の実装は存在するが、対応するユニットテストがない。`bipush` は正値・負値・ゼロ・最大・最小の5パターンがテストされているが、`sipush` は1つも存在しない。`sipush` は2バイト符号付き値を扱うため、`bipush` とは異なるコードパスを通る。
-- **修正案**: 以下のテストケースを追加する。
-  - 正値（例: 1000）
-  - 負値（例: -1000）
-  - 境界値: 32767 (INT16_MAX), -32768 (INT16_MIN)
-  - `bipush` の範囲外の値（例: 200, -200）
+- **ファイル**: `pkg/vm/vm.go:289-301`
+- **問題**: `invokespecial` のdefaultブランチで `frame.Class.FindMethod` がnilを返した場合、何もせずに正常リターンする。不正なクラスファイルや実装バグを隠蔽する可能性がある。
+  ```go
+  default:
+      method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
+      if method != nil {
+          // ... execute
+      }
+      // method == nil の場合、エラーなしで処理を続行してしまう
+  ```
+- **修正案**: method == nil の場合にエラーを返す。
+  ```go
+  if method == nil {
+      return Value{}, false, fmt.Errorf("invokespecial: method %s:%s not found", methodRef.MethodName, methodRef.Descriptor)
+  }
+  ```
 
-### [M3] if_icmpXX 命令群のテストが存在しない
+### [M3] getfield / putfield の新規オペコード用ユニットテストが存在しない
 
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: 2オペランド比較分岐命令（`if_icmpeq`, `if_icmpne`, `if_icmplt`, `if_icmpge`, `if_icmpgt`, `if_icmple`）のユニットテストが1つも存在しない。統合テスト（ControlFlow.java）で `if_icmple` は間接的にテストされているが、各命令の taken/not taken パスの明示的なテストがない。
-- **修正案**: 少なくとも `if_icmpeq`（taken/not taken）と `if_icmplt`（taken/not taken）のユニットテストを追加する。
-
-### [M4] idiv/irem のゼロ除算テストが存在しない
-
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: `idiv` と `irem` のゼロ除算処理は実装されている（instructions.go:188-189, 196-197）が、これをテストするユニットテストがない。ゼロ除算は JVM 仕様で明確に定義されたエラーケースであり、テストは必須。
-- **修正案**: ゼロ除算が `ArithmeticException` エラーを返すことを検証するテストを追加する。
-
-### [M5] 分岐命令の一部テスト不足 (ifge, ifgt, ifle)
-
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: 単項比較分岐命令のうち `ifeq`, `ifne`, `iflt` はテストされているが、`ifge`, `ifgt`, `ifle` のテストが存在しない。
-- **修正案**: 各命令の taken/not taken パスを最低1つずつテストする。
+- **ファイル**: `pkg/vm/instructions_test.go`
+- **問題**: Milestone 1.5で追加された6個のオペコード (`areturn`, `getfield`, `putfield`, `invokespecial`, `checkcast`, `ifnull`) のうち、ユニットレベルでテストされているのは `ifnull` と `areturn` の2つのみ。`getfield`, `putfield`, `invokespecial`, `checkcast` のユニットテストが存在しない。これらはTestFib統合テスト経由でのみ間接的にテストされている。
+- **修正案**: 少なくとも `getfield` と `putfield` のユニットテストを追加する。特に以下のケース:
+  - 正常なフィールド読み書き
+  - 存在しないフィールドの読み取り（デフォルトnull）
+  - nullオブジェクトへのアクセス（エラーケース）
 
 ---
 
 ## Minor Issues（改善提案）
 
-### [m1] 未使用の SystemOut 構造体
+### [m1] NativeHashMap テストに *NativeInteger キーのテストケースがない
 
-- **ファイル**: pkg/native/system.go:9
-- **問題**: `SystemOut struct{}` が定義されているが、コード内のどこからも参照されていない。`PrintStream` が直接使用されている。
-- **修正案**: `SystemOut` を削除する。
+- **ファイル**: `pkg/native/native_test.go:53-62`
+- **問題**: `TestNativeHashMap` の "integer keys" テストは `int32` を直接キーとして使用しているが、実際のVM動作では `*NativeInteger` がキーとして渡される。`Get`/`Put` メソッドの `*NativeInteger` からの値抽出パスが個別にテストされていない。
+  ```go
+  // 現在のテスト: int32 を直接使用
+  hm.Put(int32(0), int32(1))
 
-### [m2] VM が単一クラスのみサポート
+  // 実際のVM動作: *NativeInteger を使用
+  hm.Put(&NativeInteger{Value: 0}, &NativeInteger{Value: 1})
+  ```
+- **修正案**: `*NativeInteger` キーでのput/getテストを追加する。特に「同じ値の異なる `*NativeInteger` インスタンスで同じキーとして扱われること」を検証する。
 
-- **ファイル**: pkg/vm/vm.go:14-17
-- **問題**: `VM` 構造体は `ClassFile *classfile.ClassFile` として単一クラスのみ保持しているが、MILESTONES.md の仕様では `ClassFiles map[string]*classfile.ClassFile` としている。Milestone 1 では同一クラス内の `invokestatic` のみなので動作するが、Milestone 2 以降で複数クラス対応が必要になった際にリファクタリングが必要。
-- **修正案**: 今の段階では問題ないが、将来のマイルストーンを見据えた設計メモとして認識しておく。
+### [m2] HashMap.put の戻り値（前の値）テストが不足
 
-### [m3] 再帰呼び出しのサイクル検出がない
+- **ファイル**: `pkg/native/native_test.go`
+- **問題**: `Put` メソッドの戻り値（前の値、またはnil）を直接テストするケースがない。Java の `HashMap.put` は前の値を返す仕様で、この戻り値はスタックにpushされる（`vm.go:228-235`）。
+- **修正案**: `Put` の戻り値を検証するテストを追加する。
 
-- **ファイル**: pkg/vm/vm.go:44-72
-- **問題**: `executeMethod` は再帰的に呼び出されるが、無限再帰に対する防御がない。Javaプログラムが無限再帰を行った場合、Go のスタックオーバーフローになる。
-- **修正案**: フレーム数の上限チェック（例: 1024フレーム）を追加する。Milestone 1 では優先度低。
+### [m3] ifnonnull (0xC7) オペコードが未実装
 
-### [m4] countParams がエラーを返さない
+- **ファイル**: `pkg/vm/instructions.go`
+- **問題**: `ifnull` (0xC6) は実装されているが、対になる `ifnonnull` (0xC7) が未実装。Javaコンパイラは `if (got != null)` を `ifnull`（body外へジャンプ）として生成することが多いが、コンパイラバージョンや最適化レベルによっては `ifnonnull` を使用する可能性がある。
+- **現状**: TestFib統合テストが通っていることから、現在のFib.classでは `ifnonnull` は使用されていない。将来的に必要になる可能性がある。
 
-- **ファイル**: pkg/vm/vm.go:228-270
-- **問題**: `countParams` は不正なディスクリプタに対して 0 を返すだけで、エラーを報告しない。不正な classfile を読んだ場合にサイレントに失敗する。
-- **修正案**: `(int, error)` を返す設計に変更する。
+### [m4] getfield / putfield のnullレシーバーエラーメッセージが不正確
 
-### [m5] GetLocal/SetLocal に境界チェックがない
+- **ファイル**: `pkg/vm/vm.go:139, 165`
+- **問題**: nullオブジェクトに対するgetfield/putfieldでは、JVMでは `NullPointerException` が発生するべきだが、現在の実装では "receiver is not a JObject" というエラーメッセージが返される。nullの場合、`objectRef.Ref` は `nil` なので型アサーション `nil.(*JObject)` は `(nil, false)` を返し、`!ok` でエラーになる。動作としては正しくエラーになるが、エラーメッセージがミスリーディング。
+- **修正案**: nullチェックを型アサーションの前に行い、`NullPointerException` を返す。
+  ```go
+  if objectRef.Type == TypeNull || objectRef.Ref == nil {
+      return Value{}, false, fmt.Errorf("NullPointerException")
+  }
+  ```
 
-- **ファイル**: pkg/vm/frame.go:71-78
-- **問題**: `GetLocal` と `SetLocal` はインデックスの境界チェックを行っていない。不正なバイトコードにより panic の可能性がある。[M1] と同様の問題。
-- **修正案**: [M1] と同様に境界チェックを追加する。
+### [m5] Integer.valueOf のパラメータ数がハードコードされている
 
-### [m6] ldc 命令のユニットテストが存在しない
+- **ファイル**: `pkg/vm/vm.go:316-319`
+- **問題**: `invokestatic` の `Integer.valueOf` 処理では、ディスクリプタをパースせずに直接1回のPopでint値を取得している。他のinvokestaticのユーザーメソッド呼び出しでは `countParams` を使ってディスクリプタからパラメータ数を算出している。一貫性がない。
+  ```go
+  if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "valueOf" {
+      intVal := frame.Pop()  // パラメータ数をハードコード
+      // ...
+  }
+  ```
+- **現状**: `Integer.valueOf(I)` は1パラメータなので動作に問題はない。将来ネイティブメソッドが増えた際のメンテナンス性の懸念。
 
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: `ldc` 命令はコンスタントプールへのアクセスを伴うため、統合テストでは間接的にテストされているが、ユニットレベルでのテストが存在しない。`executeAndGetInt` ヘルパーが `nil` ClassFile で Frame を作成するため、ldc のテストが難しい構造になっている。
-- **修正案**: ClassFile を持つ Frame を使う ldc 専用のテストヘルパーを追加する。
+### [m6] Milestone 1レビューの指摘事項の一部が修正済み
 
-### [m7] aload/astore 命令のユニットテストが存在しない
-
-- **ファイル**: pkg/vm/instructions_test.go
-- **問題**: `aload`, `aload_0`〜`aload_3`, `astore`, `astore_0`〜`astore_3` のユニットテストが存在しない。参照型の値のロード/ストアは整数型とは異なるコードパスを通る。
-- **修正案**: RefValue と NullValue を使ったテストケースを追加する。
-
-### [m8] 統合テストに異常系テストがない
-
-- **ファイル**: pkg/vm/integration_test.go
-- **問題**: 全ての統合テストが正常系のみ。例えば、main メソッドが存在しない classfile の実行テストや、不正なバイトコードを含む classfile のテストがない。
-- **修正案**: 少なくとも「main メソッドが見つからない場合のエラー」テストを追加する。
+- **M1 (Push/Pop 境界チェック)**: `frame.go:63-78` にpanicによる境界チェックが追加されている。✓ 修正済み。
+- **M2 (sipush テスト)**: `instructions_test.go:259-282` に追加されている。✓ 修正済み。
+- **M3 (if_icmpXX テスト)**: `instructions_test.go:384-422` に追加されている。✓ 修正済み。
+- **M4 (ゼロ除算テスト)**: `instructions_test.go:284-337` に追加されている。✓ 修正済み。
+- **M5 (ifge/ifgt/ifle テスト)**: `instructions_test.go:424-456` に追加されている。✓ 修正済み。
+- **m3 (再帰呼び出しのサイクル検出)**: `vm.go:13-14, 53-57` に `maxFrameDepth = 1024` の上限が追加されている。✓ 修正済み。
+- **m4 (countParams がエラーを返さない)**: `vm.go:375-417` で `(int, error)` を返すように変更されている。✓ 修正済み。
+- **m5 (GetLocal/SetLocal 境界チェック)**: `frame.go:81-93` にpanicによる境界チェックが追加されている。✓ 修正済み。
 
 ---
 
@@ -130,43 +134,42 @@
 
 ### カバレッジの評価
 
-| ファイル | テストカバレッジ | 評価 |
-|---------|----------------|------|
-| pkg/classfile/parser.go | 正常系2パターン + 不正マジック | **良好** |
-| pkg/classfile/constant_pool.go | parser_test 経由で間接テスト | **可** |
-| pkg/vm/frame.go | Push/Pop/LocalVars の基本操作 | **良好** |
-| pkg/vm/instructions.go | iconst, bipush, 算術, 分岐, スタック操作, ローカル変数 | **可〜良好** |
-| pkg/vm/vm.go | 統合テスト経由 | **可** |
-| pkg/native/system.go | 統合テスト経由 | **可** |
-| cmd/gojvm/main.go | テストなし | **不足** |
+| ファイル | テスト | 評価 |
+|---------|--------|------|
+| `pkg/vm/object.go` | `object_test.go` — 6テストケース | **良好** |
+| `pkg/native/hashmap.go` | `native_test.go` — 5テストケース | **可** (`*NativeInteger` キーのテスト不足) |
+| `pkg/native/integer.go` | `native_test.go` — 4テストケース | **良好** |
+| `pkg/vm/instructions.go` (新規オペコード) | `ifnull`, `areturn` のみユニットテストあり | **不足** (`getfield`/`putfield`/`checkcast`なし) |
+| `pkg/vm/vm.go` (新規メソッド) | TestFib統合テスト経由のみ | **可** |
+| `pkg/vm/integration_test.go` | TestFib が89を正しく検証 | **良好** |
 
 ### 不足しているテストケース
 
 **高優先度:**
-1. `sipush` のユニットテスト（境界値含む）
-2. `if_icmpXX` のユニットテスト（各命令の taken/not taken）
-3. `idiv`/`irem` のゼロ除算テスト
-4. `ifge`/`ifgt`/`ifle` のユニットテスト
+1. `getfield` / `putfield` のユニットテスト（正常系 + nullレシーバー）
+2. `NativeHashMap` の `*NativeInteger` キーテスト（値ベース比較の検証）
 
 **中優先度:**
-5. `ldc` 命令のユニットテスト（Integer / String）
-6. `aload`/`astore` 系のユニットテスト
-7. 統合テストの異常系（main メソッドなし等）
-8. `aconst_null` のテスト
+3. `HashMap.put` 戻り値テスト（前の値の返却）
+4. `invokespecial` のユニットテスト（コンストラクタ呼び出し）
+5. `checkcast` のユニットテスト（no-op動作の検証）
 
 **低優先度:**
-9. 整数オーバーフロー（INT32_MAX + 1）のテスト
-10. `Frame.ReadU8`/`ReadI8`/`ReadU16`/`ReadI16` のユニットテスト
-11. コンスタントプールの不正インデックスに対するエラーテスト
+6. `invokevirtual` でのnullレシーバーのエラーハンドリングテスト
+7. `invokestatic Integer.valueOf` のユニットテスト
 
 ---
 
 ## Good Points（良い点）
 
-- **JVM仕様への忠実な準拠**: 分岐命令のオフセット計算（opcode PC 基準）、isub/idiv/irem のオペランド順序（value1=下, value2=上）、bipush の符号拡張、コンスタントプールの1始まりインデックスなど、JVM仕様の要注意ポイントが全て正しく実装されている。
-- **クリーンなパッケージ構成**: classfile / vm / native / cmd の分離が適切で、パッケージ間の依存関係が一方向。
-- **充実したエラーメッセージ**: classfile パーサーのエラーメッセージにインデックス番号やメソッド名が含まれており、デバッグに有用。`fmt.Errorf` の `%w` によるエラーラッピングも適切。
-- **Stdout の DI**: `VM.Stdout` を `io.Writer` として注入可能にしている設計は、テスタビリティが高い。統合テストで `bytes.Buffer` にキャプチャできている。
-- **テストヘルパーの設計**: `executeAndGetInt` や `runClass` ヘルパーにより、テストが簡潔で読みやすい。
-- **メソッドディスクリプタのパース**: `countParams` が配列型（`[I`, `[Ljava/lang/String;`, `[[I`）を正しく処理している。
-- **統合テストの網羅性**: Hello（基本出力）、Add（メソッド呼び出し）、Arithmetic（四則演算）、ControlFlow（条件分岐・ループ）、PrintString（文字列出力）と、Milestone 1 の主要機能を網羅している。
+- **JVM仕様への正確な準拠**: ifnull のオフセット計算（opcode PC基準）、putfield のスタック操作順序（value → objectRef の順でpop）、invokespecial/invokevirtual の `this` 引数の処理、すべてJVM仕様に正確に準拠している。
+- **NativeInteger の値ベース比較**: `NativeHashMap` が `*NativeInteger` キーから `.Value` (int32) を抽出してGo mapのキーとして使用する設計は正しく、異なるポインタでも同じ値なら同一キーとして扱われる。
+- **HashMap の戻り値処理**: `Get` はキーが存在しない場合にnilを返し、`Put` は前の値（なければnil）を返す。Java仕様通り。
+- **JObject の簡潔な設計**: `ClassName + map[string]Value` というシンプルな構造で、Milestone 1.5の要件を過不足なく満たしている。
+- **new 命令の分岐設計**: クラス名に応じて `NativeHashMap` と `JObject` を切り替える設計は、将来の拡張にも対応しやすい。
+- **invokevirtual の汎用化**: PrintStream.println、HashMap.get/put、Integer.intValue、ユーザー定義メソッドの4パターンを段階的にディスパッチする構造が明快。
+- **countParams の堅牢性**: 配列型（`[I`, `[Ljava/lang/String;`, `[[I`）やオブジェクト型を正しくパースし、エラーも返すように改善されている。
+- **maxFrameDepth による再帰防止**: Fib.javaのような再帰プログラムでの無限再帰を防止する上限（1024フレーム）が設定されている。
+- **テストの読みやすさ**: `TestJObjectFields` は6つのサブテストで主要なユースケースを網羅。テスト名も具体的で分かりやすい。
+- **TestFib統合テストの正確性**: `Fib(10) = 89` の検証が正しい（fib(0)=1, fib(1)=1 の初期化で、fib(10)=89）。
+- **Milestone 1 レビュー指摘事項への対応**: 前回レビューの主要指摘事項（Push/Pop境界チェック、sipushテスト、if_icmpXXテスト、ゼロ除算テスト、countParamsエラー返却、再帰上限）がすべて修正済み。

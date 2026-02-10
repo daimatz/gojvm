@@ -60,9 +60,15 @@ const (
 	OpIreturn    = 0xAC
 	OpReturn     = 0xB1
 	OpGetstatic  = 0xB2
+	OpAreturn       = 0xB0
+	OpGetfield      = 0xB4
+	OpPutfield      = 0xB5
 	OpInvokevirtual = 0xB6
+	OpInvokespecial = 0xB7
 	OpInvokestatic  = 0xB8
-	OpNew        = 0xBB
+	OpNew           = 0xBB
+	OpCheckcast     = 0xC0
+	OpIfnull        = 0xC6
 )
 
 // executeInstruction executes a single bytecode instruction.
@@ -237,6 +243,9 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.PC = branchPC + int(offset)
 
 	// --- Return ---
+	case OpAreturn:
+		return frame.Pop(), true, nil
+
 	case OpIreturn:
 		return frame.Pop(), true, nil
 
@@ -247,14 +256,34 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 	case OpGetstatic:
 		return vm.executeGetstatic(frame)
 
+	case OpGetfield:
+		return vm.executeGetfield(frame)
+
+	case OpPutfield:
+		return vm.executePutfield(frame)
+
 	case OpInvokevirtual:
 		return vm.executeInvokevirtual(frame)
+
+	case OpInvokespecial:
+		return vm.executeInvokespecial(frame)
 
 	case OpInvokestatic:
 		return vm.executeInvokestatic(frame)
 
 	case OpNew:
 		return vm.executeNew(frame)
+
+	case OpCheckcast:
+		frame.ReadU16() // read and discard index (no-op for Milestone 1.5)
+
+	case OpIfnull:
+		branchPC := frame.PC - 1
+		offset := frame.ReadI16()
+		val := frame.Pop()
+		if val.Type == TypeNull || (val.Type == TypeRef && val.Ref == nil) {
+			frame.PC = branchPC + int(offset)
+		}
 
 	default:
 		return Value{}, false, fmt.Errorf("unknown opcode: 0x%02X at PC=%d", opcode, frame.PC-1)

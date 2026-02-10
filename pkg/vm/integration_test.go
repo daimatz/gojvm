@@ -75,3 +75,11 @@ func TestPrintString(t *testing.T) {
 		t.Errorf("PrintString output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestFib(t *testing.T) {
+	got := runClass(t, "../../testdata/Fib.class")
+	want := "89\n"
+	if got != want {
+		t.Errorf("Fib output:\ngot  %q\nwant %q", got, want)
+	}
+}

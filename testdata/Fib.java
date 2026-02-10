@@ -1,8 +1,13 @@
 import java.util.HashMap;
 
 class Fib {
-  private HashMap<Integer, Integer> cache = new HashMap<>();
+  private HashMap<Integer, Integer> cache;
 
+  public Fib() {
+    cache = new HashMap<>();
+    cache.put(0, 1);
+    cache.put(1, 1);
+  }
   public int fib(int n) {
     Integer got = cache.get(n);
     if (got != null) {
@@ -13,6 +18,6 @@ class Fib {
     return value;
   }
   public static void main(String[] args) {
-    new Main().fib(10);
+    System.out.println(new Fib().fib(10));
   }
 }

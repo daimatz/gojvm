@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -708,6 +709,16 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokevirtual: receiver is not a JObject for method %s.%s", methodRef.ClassName, methodRef.MethodName)
 	}
 
+	// Handle ArrayList.sort natively (avoids deep JDK internals)
+	if obj.ClassName == "java/util/ArrayList" && methodRef.MethodName == "sort" {
+		return vm.handleArrayListSort(frame, obj, args)
+	}
+
+	// Handle Integer/Long/Double native methods
+	if retVal, handled, err := vm.handleBoxedType(frame, obj, methodRef.MethodName, methodRef.Descriptor, args); handled {
+		return retVal, false, err
+	}
+
 	// Lambda proxy dispatch
 	if obj.LambdaTarget != nil && methodRef.MethodName == obj.LambdaTarget.MethodName {
 		lt := obj.LambdaTarget
@@ -959,6 +970,17 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		if !isVoidReturn(methodRef.Descriptor) {
 			frame.Push(NullValue())
 		}
+		return Value{}, false, nil
+	}
+
+	// Handle Collections.sort natively (avoids deep JDK internals)
+	if methodRef.ClassName == "java/util/Collections" && methodRef.MethodName == "sort" {
+		return vm.handleCollectionsSort(frame, methodRef.Descriptor, args)
+	}
+
+	// Handle Integer.compare natively
+	if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "compare" {
+		frame.Push(IntValue(vm.compareInt32(args[0].Int, args[1].Int)))
 		return Value{}, false, nil
 	}
 
@@ -1626,4 +1648,227 @@ func (vm *VM) handleStringValueOf(descriptor string, args []Value) (Value, error
 		return RefValue(vm.valueToString(args[0])), nil
 	}
 	return Value{}, fmt.Errorf("String.valueOf not implemented for %s", descriptor)
+}
+
+// handleCollectionsSort handles Collections.sort natively.
+func (vm *VM) handleCollectionsSort(frame *Frame, descriptor string, args []Value) (Value, bool, error) {
+	list := args[0]
+	obj, ok := list.Ref.(*JObject)
+	if !ok {
+		return Value{}, false, fmt.Errorf("Collections.sort: list is not a JObject")
+	}
+	elemData, ok := obj.Fields["elementData"]
+	if !ok {
+		return Value{}, false, fmt.Errorf("Collections.sort: no elementData field")
+	}
+	arr, ok := elemData.Ref.(*JArray)
+	if !ok {
+		return Value{}, false, fmt.Errorf("Collections.sort: elementData is not a JArray")
+	}
+	size := int(obj.Fields["size"].Int)
+
+	if descriptor == "(Ljava/util/List;)V" {
+		// Natural ordering
+		sort.SliceStable(arr.Elements[:size], func(i, j int) bool {
+			return vm.compareNatural(arr.Elements[i], arr.Elements[j]) < 0
+		})
+	} else {
+		// With Comparator — use lambda if available
+		comparator := args[1]
+		if comparator.Type != TypeNull {
+			sort.SliceStable(arr.Elements[:size], func(i, j int) bool {
+				result, err := vm.invokeComparator(comparator, arr.Elements[i], arr.Elements[j])
+				if err != nil {
+					return false
+				}
+				return result < 0
+			})
+		} else {
+			sort.SliceStable(arr.Elements[:size], func(i, j int) bool {
+				return vm.compareNatural(arr.Elements[i], arr.Elements[j]) < 0
+			})
+		}
+	}
+	return Value{}, false, nil
+}
+
+// handleArrayListSort handles ArrayList.sort(Comparator) natively.
+func (vm *VM) handleArrayListSort(frame *Frame, obj *JObject, args []Value) (Value, bool, error) {
+	elemData, ok := obj.Fields["elementData"]
+	if !ok {
+		return Value{}, false, fmt.Errorf("ArrayList.sort: no elementData field")
+	}
+	arr, ok := elemData.Ref.(*JArray)
+	if !ok {
+		return Value{}, false, fmt.Errorf("ArrayList.sort: elementData is not a JArray")
+	}
+	size := int(obj.Fields["size"].Int)
+
+	if len(args) > 0 && args[0].Type != TypeNull {
+		comparator := args[0]
+		sort.SliceStable(arr.Elements[:size], func(i, j int) bool {
+			result, err := vm.invokeComparator(comparator, arr.Elements[i], arr.Elements[j])
+			if err != nil {
+				return false
+			}
+			return result < 0
+		})
+	} else {
+		sort.SliceStable(arr.Elements[:size], func(i, j int) bool {
+			return vm.compareNatural(arr.Elements[i], arr.Elements[j]) < 0
+		})
+	}
+	// Increment modCount
+	if mc, ok := obj.Fields["modCount"]; ok {
+		obj.Fields["modCount"] = IntValue(mc.Int + 1)
+	}
+	return Value{}, false, nil
+}
+
+// compareNatural compares two Values using natural ordering (Comparable).
+func (vm *VM) compareNatural(a, b Value) int {
+	// String comparison
+	if aStr, ok := a.Ref.(string); ok {
+		if bStr, ok := b.Ref.(string); ok {
+			return strings.Compare(aStr, bStr)
+		}
+	}
+	// Boxed Integer comparison
+	if aObj, ok := a.Ref.(*JObject); ok {
+		if bObj, ok := b.Ref.(*JObject); ok {
+			aVal, aHas := aObj.Fields["value"]
+			bVal, bHas := bObj.Fields["value"]
+			if aHas && bHas {
+				switch {
+				case aVal.Type == TypeInt && bVal.Type == TypeInt:
+					return int(vm.compareInt32(aVal.Int, bVal.Int))
+				case aVal.Type == TypeLong && bVal.Type == TypeLong:
+					if aVal.Long < bVal.Long {
+						return -1
+					} else if aVal.Long > bVal.Long {
+						return 1
+					}
+					return 0
+				case aVal.Type == TypeDouble && bVal.Type == TypeDouble:
+					if aVal.Double < bVal.Double {
+						return -1
+					} else if aVal.Double > bVal.Double {
+						return 1
+					}
+					return 0
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// invokeComparator calls a Comparator's compare(Object, Object) method.
+func (vm *VM) invokeComparator(comparator Value, a, b Value) (int32, error) {
+	if obj, ok := comparator.Ref.(*JObject); ok && obj.LambdaTarget != nil {
+		lt := obj.LambdaTarget
+		cf, method, err := vm.resolveMethod(lt.TargetClass, lt.TargetMethod, lt.TargetDesc)
+		if err != nil {
+			return 0, err
+		}
+		fullArgs := make([]Value, 0, len(lt.CapturedArgs)+2)
+		fullArgs = append(fullArgs, lt.CapturedArgs...)
+		fullArgs = append(fullArgs, a, b)
+		retVal, err := vm.executeMethod(cf, method, fullArgs)
+		if err != nil {
+			return 0, err
+		}
+		return retVal.Int, nil
+	}
+	if obj, ok := comparator.Ref.(*JObject); ok {
+		cf, method, err := vm.resolveMethod(obj.ClassName, "compare", "(Ljava/lang/Object;Ljava/lang/Object;)I")
+		if err != nil {
+			return 0, err
+		}
+		retVal, err := vm.executeMethod(cf, method, []Value{comparator, a, b})
+		if err != nil {
+			return 0, err
+		}
+		return retVal.Int, nil
+	}
+	return 0, nil
+}
+
+// compareInt32 compares two int32 values.
+func (vm *VM) compareInt32(a, b int32) int32 {
+	if a < b {
+		return -1
+	} else if a > b {
+		return 1
+	}
+	return 0
+}
+
+// handleBoxedType handles methods on boxed types (Integer, Long, Double, etc.)
+func (vm *VM) handleBoxedType(frame *Frame, obj *JObject, methodName, descriptor string, args []Value) (Value, bool, error) {
+	val, hasValue := obj.Fields["value"]
+	if !hasValue {
+		return Value{}, false, nil // not handled
+	}
+	switch methodName {
+	case "intValue":
+		if val.Type == TypeInt {
+			frame.Push(IntValue(val.Int))
+			return Value{}, true, nil
+		}
+	case "longValue":
+		if val.Type == TypeLong {
+			frame.Push(LongValue(val.Long))
+			return Value{}, true, nil
+		}
+		if val.Type == TypeInt {
+			frame.Push(LongValue(int64(val.Int)))
+			return Value{}, true, nil
+		}
+	case "doubleValue":
+		if val.Type == TypeDouble {
+			frame.Push(DoubleValue(val.Double))
+			return Value{}, true, nil
+		}
+		if val.Type == TypeInt {
+			frame.Push(DoubleValue(float64(val.Int)))
+			return Value{}, true, nil
+		}
+	case "floatValue":
+		if val.Type == TypeFloat {
+			frame.Push(FloatValue(val.Float))
+			return Value{}, true, nil
+		}
+	case "compareTo":
+		if len(args) > 0 {
+			if other, ok := args[0].Ref.(*JObject); ok {
+				if otherVal, ok := other.Fields["value"]; ok {
+					frame.Push(IntValue(vm.compareInt32(val.Int, otherVal.Int)))
+					return Value{}, true, nil
+				}
+			}
+		}
+	case "equals":
+		if len(args) > 0 {
+			if args[0].Type == TypeNull {
+				frame.Push(IntValue(0))
+				return Value{}, true, nil
+			}
+			if other, ok := args[0].Ref.(*JObject); ok {
+				if otherVal, ok := other.Fields["value"]; ok && val.Type == otherVal.Type && val.Int == otherVal.Int {
+					frame.Push(IntValue(1))
+					return Value{}, true, nil
+				}
+			}
+			frame.Push(IntValue(0))
+			return Value{}, true, nil
+		}
+	case "hashCode":
+		frame.Push(IntValue(val.Int))
+		return Value{}, true, nil
+	case "toString":
+		frame.Push(RefValue(fmt.Sprintf("%d", val.Int)))
+		return Value{}, true, nil
+	}
+	return Value{}, false, nil // not handled
 }

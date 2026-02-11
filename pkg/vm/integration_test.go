@@ -231,3 +231,11 @@ func TestHashMapIteration(t *testing.T) {
 		t.Errorf("HashMapIteration output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestCollectionsSort(t *testing.T) {
+	got := runClass(t, "../../testdata/CollectionsSortTest.class")
+	want := "Alice\nBob\nCharlie\n10\n20\n30\n"
+	if got != want {
+		t.Errorf("CollectionsSort output:\ngot  %q\nwant %q", got, want)
+	}
+}

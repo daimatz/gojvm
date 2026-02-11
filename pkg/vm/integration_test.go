@@ -2,33 +2,29 @@ package vm
 
 import (
 	"bytes"
-	"os"
+	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/daimatz/gojvm/pkg/classfile"
 )
 
-// runClass parses a .class file, loads it into a VM, executes it,
+const testJmodPath = "/usr/lib/jvm/java-17-openjdk-arm64/jmods/java.base.jmod"
+
+// runClass parses a .class file, loads it into a VM with class loader, executes it,
 // and returns the captured stdout output.
 func runClass(t *testing.T, classFilePath string) string {
 	t.Helper()
 
-	f, err := os.Open(classFilePath)
-	if err != nil {
-		t.Fatalf("failed to open %s: %v", classFilePath, err)
-	}
-	defer f.Close()
+	classPath := filepath.Dir(classFilePath)
+	className := strings.TrimSuffix(filepath.Base(classFilePath), ".class")
 
-	cf, err := classfile.Parse(f)
-	if err != nil {
-		t.Fatalf("failed to parse %s: %v", classFilePath, err)
-	}
+	bootstrap := NewJmodClassLoader(testJmodPath)
+	userCL := NewUserClassLoader(classPath, bootstrap)
 
 	var buf bytes.Buffer
-	v := NewVM(cf)
+	v := NewVM(userCL)
 	v.Stdout = &buf
 
-	err = v.Execute()
+	err := v.Execute(className)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}

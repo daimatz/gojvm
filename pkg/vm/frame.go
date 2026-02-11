@@ -10,21 +10,35 @@ import (
 type ValueType int
 
 const (
-	TypeInt  ValueType = iota
+	TypeInt ValueType = iota
+	TypeFloat
+	TypeLong
 	TypeRef
 	TypeNull
 )
 
 // Value represents a value on the operand stack or in local variables.
 type Value struct {
-	Type ValueType
-	Int  int32
-	Ref  interface{}
+	Type  ValueType
+	Int   int32
+	Float float32
+	Long  int64
+	Ref   interface{}
 }
 
 // IntValue creates an integer Value.
 func IntValue(v int32) Value {
 	return Value{Type: TypeInt, Int: v}
+}
+
+// FloatValue creates a float Value.
+func FloatValue(v float32) Value {
+	return Value{Type: TypeFloat, Float: v}
+}
+
+// LongValue creates a long Value.
+func LongValue(v int64) Value {
+	return Value{Type: TypeLong, Long: v}
 }
 
 // RefValue creates a reference Value.
@@ -118,5 +132,12 @@ func (f *Frame) ReadU16() uint16 {
 func (f *Frame) ReadI16() int16 {
 	val := int16(f.Code[f.PC])<<8 | int16(f.Code[f.PC+1])
 	f.PC += 2
+	return val
+}
+
+// ReadI32 reads an int32 operand (big-endian) and advances PC by 4.
+func (f *Frame) ReadI32() int32 {
+	val := int32(f.Code[f.PC])<<24 | int32(f.Code[f.PC+1])<<16 | int32(f.Code[f.PC+2])<<8 | int32(f.Code[f.PC+3])
+	f.PC += 4
 	return val
 }

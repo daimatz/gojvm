@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/daimatz/gojvm/pkg/classfile"
-	"github.com/daimatz/gojvm/pkg/native"
 )
 
 // executeAndGetInt creates a Frame with the given bytecodes, runs the execution
@@ -612,11 +611,11 @@ func TestGetfieldPutfield(t *testing.T) {
 		t.Fatal("bytecode did not return a value")
 	})
 
-	t.Run("getfield on unset field returns null", func(t *testing.T) {
+	t.Run("getfield on unset int field returns zero", func(t *testing.T) {
 		code := []byte{
 			0x2A,             // aload_0
-			0xB4, 0x00, 0x01, // getfield #1
-			0xB0,             // areturn
+			0xB4, 0x00, 0x01, // getfield #1 (descriptor "I")
+			0xAC,             // ireturn
 		}
 
 		frame := NewFrame(4, 10, code, cf)
@@ -632,8 +631,8 @@ func TestGetfieldPutfield(t *testing.T) {
 				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
 			}
 			if hasReturn {
-				if retVal.Type != TypeNull {
-					t.Errorf("getfield on unset field: got type %v, want TypeNull", retVal.Type)
+				if retVal.Type != TypeInt || retVal.Int != 0 {
+					t.Errorf("getfield on unset int field: got type=%v val=%d, want TypeInt val=0", retVal.Type, retVal.Int)
 				}
 				return
 			}
@@ -724,16 +723,16 @@ func TestCheckcast(t *testing.T) {
 	})
 }
 
-func TestIfnullNonNullNativeInteger(t *testing.T) {
+func TestIfnullNonNullJObject(t *testing.T) {
 	v := &VM{Stdout: io.Discard}
 
 	// aload_0, ifnull(offset=5, target=6), iconst_1, ireturn, iconst_2, ireturn
 	code := []byte{0x2A, 0xC6, 0x00, 0x05, 0x04, 0xAC, 0x05, 0xAC}
 
-	t.Run("NativeInteger is non-null", func(t *testing.T) {
+	t.Run("JObject is non-null", func(t *testing.T) {
 		frame := NewFrame(4, 10, code, nil)
-		ni := native.IntegerValueOf(42)
-		frame.SetLocal(0, RefValue(ni))
+		obj := &JObject{ClassName: "java/lang/Integer", Fields: make(map[string]Value)}
+		frame.SetLocal(0, RefValue(obj))
 
 		for frame.PC < len(frame.Code) {
 			opcode := frame.Code[frame.PC]
@@ -744,7 +743,325 @@ func TestIfnullNonNullNativeInteger(t *testing.T) {
 			}
 			if hasReturn {
 				if retVal.Int != 1 {
-					t.Errorf("ifnull with NativeInteger: got %d, want 1 (not taken)", retVal.Int)
+					t.Errorf("ifnull with JObject: got %d, want 1 (not taken)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestIinc(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial int32
+		inc     int8
+		want    int32
+	}{
+		{"positive increment", 10, 5, 15},
+		{"negative increment", 10, -3, 7},
+		{"zero increment", 42, 0, 42},
+		{"increment from zero", 0, 1, 1},
+		{"large negative", 100, -128, -28},
+		{"large positive", 0, 127, 127},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// iload_0, iinc 0 <const>, iload_0, ireturn
+			code := []byte{0x1A, OpIinc, 0x00, byte(tt.inc), 0x1A, 0xAC}
+			got := executeAndGetInt(t, code, tt.initial)
+			if got != tt.want {
+				t.Errorf("iinc(%d, %d): got %d, want %d", tt.initial, tt.inc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnewarray(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	// Constant pool with a Class entry for the element type
+	pool := make([]classfile.ConstantPoolEntry, 3)
+	pool[1] = &classfile.ConstantClass{NameIndex: 2}
+	pool[2] = &classfile.ConstantUtf8{Value: "java/lang/Object"}
+	cf := &classfile.ClassFile{ConstantPool: pool}
+
+	t.Run("create array of size 5", func(t *testing.T) {
+		code := []byte{
+			0x08,             // iconst_5
+			OpAnewarray, 0x00, 0x01, // anewarray #1
+			0xB0,             // areturn
+		}
+		frame := NewFrame(4, 10, code, cf)
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				arr, ok := retVal.Ref.(*JArray)
+				if !ok {
+					t.Fatalf("expected *JArray, got %T", retVal.Ref)
+				}
+				if len(arr.Elements) != 5 {
+					t.Errorf("array length: got %d, want 5", len(arr.Elements))
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("create array of size 0", func(t *testing.T) {
+		code := []byte{
+			0x03,             // iconst_0
+			OpAnewarray, 0x00, 0x01, // anewarray #1
+			0xB0,             // areturn
+		}
+		frame := NewFrame(4, 10, code, cf)
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				arr, ok := retVal.Ref.(*JArray)
+				if !ok {
+					t.Fatalf("expected *JArray, got %T", retVal.Ref)
+				}
+				if len(arr.Elements) != 0 {
+					t.Errorf("array length: got %d, want 0", len(arr.Elements))
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestAaloadAastore(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	t.Run("store and load element", func(t *testing.T) {
+		// Create an array, store a value, load it back
+		arr := &JArray{Elements: make([]Value, 3)}
+
+		// aload_0, iconst_1, bipush 99, aastore, aload_0, iconst_1, aaload, ireturn
+		code := []byte{
+			0x2A,       // aload_0 (array ref)
+			0x04,       // iconst_1 (index)
+			0x10, 0x63, // bipush 99 (value)
+			OpAastore,  // aastore
+			0x2A,       // aload_0 (array ref)
+			0x04,       // iconst_1 (index)
+			OpAaload,   // aaload
+			0xAC,       // ireturn
+		}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, RefValue(arr))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 99 {
+					t.Errorf("aaload after aastore: got %d, want 99", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("store at different indices", func(t *testing.T) {
+		arr := &JArray{Elements: make([]Value, 3)}
+		arr.Elements[0] = IntValue(10)
+		arr.Elements[1] = IntValue(20)
+		arr.Elements[2] = IntValue(30)
+
+		// aload_0, iconst_2, aaload, ireturn
+		code := []byte{0x2A, 0x05, OpAaload, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, RefValue(arr))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 30 {
+					t.Errorf("aaload index 2: got %d, want 30", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestIfAcmpne(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	t.Run("same reference - not taken", func(t *testing.T) {
+		obj := &JObject{ClassName: "Test", Fields: make(map[string]Value)}
+		// aload_0, aload_0, if_acmpne(offset=5, target=7), iconst_0, ireturn, iconst_1, ireturn
+		code := []byte{0x2A, 0x2A, OpIfAcmpne, 0x00, 0x05, 0x03, 0xAC, 0x04, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, RefValue(obj))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 0 {
+					t.Errorf("if_acmpne same ref: got %d, want 0 (not taken)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("different references - taken", func(t *testing.T) {
+		obj1 := &JObject{ClassName: "Test", Fields: make(map[string]Value)}
+		obj2 := &JObject{ClassName: "Test", Fields: make(map[string]Value)}
+		// aload_0, aload_1, if_acmpne(offset=5, target=7), iconst_0, ireturn, iconst_1, ireturn
+		code := []byte{0x2A, 0x2B, OpIfAcmpne, 0x00, 0x05, 0x03, 0xAC, 0x04, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, RefValue(obj1))
+		frame.SetLocal(1, RefValue(obj2))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 1 {
+					t.Errorf("if_acmpne diff ref: got %d, want 1 (taken)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("both null - not taken", func(t *testing.T) {
+		// aload_0, aload_1, if_acmpne(offset=5, target=7), iconst_0, ireturn, iconst_1, ireturn
+		code := []byte{0x2A, 0x2B, OpIfAcmpne, 0x00, 0x05, 0x03, 0xAC, 0x04, 0xAC}
+		frame := NewFrame(4, 10, code, nil)
+		frame.SetLocal(0, NullValue())
+		frame.SetLocal(1, NullValue())
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 0 {
+					t.Errorf("if_acmpne both null: got %d, want 0 (not taken)", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+}
+
+func TestInstanceof(t *testing.T) {
+	v := &VM{Stdout: io.Discard}
+
+	pool := make([]classfile.ConstantPoolEntry, 3)
+	pool[1] = &classfile.ConstantClass{NameIndex: 2}
+	pool[2] = &classfile.ConstantUtf8{Value: "java/lang/Integer"}
+	cf := &classfile.ClassFile{ConstantPool: pool}
+
+	t.Run("matching class", func(t *testing.T) {
+		obj := &JObject{ClassName: "java/lang/Integer", Fields: make(map[string]Value)}
+		// aload_0, instanceof #1, ireturn
+		code := []byte{0x2A, OpInstanceof, 0x00, 0x01, 0xAC}
+		frame := NewFrame(4, 10, code, cf)
+		frame.SetLocal(0, RefValue(obj))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 1 {
+					t.Errorf("instanceof matching: got %d, want 1", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("non-matching class", func(t *testing.T) {
+		obj := &JObject{ClassName: "java/lang/String", Fields: make(map[string]Value)}
+		code := []byte{0x2A, OpInstanceof, 0x00, 0x01, 0xAC}
+		frame := NewFrame(4, 10, code, cf)
+		frame.SetLocal(0, RefValue(obj))
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 0 {
+					t.Errorf("instanceof non-matching: got %d, want 0", retVal.Int)
+				}
+				return
+			}
+		}
+		t.Fatal("bytecode did not return a value")
+	})
+
+	t.Run("null reference", func(t *testing.T) {
+		code := []byte{0x2A, OpInstanceof, 0x00, 0x01, 0xAC}
+		frame := NewFrame(4, 10, code, cf)
+		frame.SetLocal(0, NullValue())
+
+		for frame.PC < len(frame.Code) {
+			opcode := frame.Code[frame.PC]
+			frame.PC++
+			retVal, hasReturn, err := v.executeInstruction(frame, opcode)
+			if err != nil {
+				t.Fatalf("execution error at PC=%d: %v", frame.PC-1, err)
+			}
+			if hasReturn {
+				if retVal.Int != 0 {
+					t.Errorf("instanceof null: got %d, want 0", retVal.Int)
 				}
 				return
 			}

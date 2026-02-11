@@ -3,7 +3,9 @@ package vm
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/daimatz/gojvm/pkg/classfile"
@@ -13,24 +15,39 @@ import (
 // maxFrameDepth is the maximum number of nested method calls.
 const maxFrameDepth = 1024
 
+// AccNative is the access flag for native methods.
+const AccNative = 0x0100
+
+// AccAbstract is the access flag for abstract methods.
+const AccAbstract = 0x0400
+
 // VM is the virtual machine that executes Java bytecode.
 type VM struct {
-	ClassFile  *classfile.ClassFile
-	Stdout     io.Writer
-	frameDepth int
+	ClassLoader        ClassLoader
+	Stdout             io.Writer
+	frameDepth         int
+	staticFields       map[string]map[string]Value // className -> fieldName -> Value
+	initializedClasses map[string]bool             // <clinit> done
 }
 
-// NewVM creates a new VM with the given class file.
-func NewVM(cf *classfile.ClassFile) *VM {
+// NewVM creates a new VM with the given class loader.
+func NewVM(cl ClassLoader) *VM {
 	return &VM{
-		ClassFile: cf,
-		Stdout:    os.Stdout,
+		ClassLoader:        cl,
+		Stdout:             os.Stdout,
+		staticFields:       make(map[string]map[string]Value),
+		initializedClasses: make(map[string]bool),
 	}
 }
 
-// Execute finds and executes the main method of the class.
-func (vm *VM) Execute() error {
-	method := vm.ClassFile.FindMethod("main", "([Ljava/lang/String;)V")
+// Execute finds and executes the main method of the given class.
+func (vm *VM) Execute(mainClassName string) error {
+	cf, err := vm.ClassLoader.LoadClass(mainClassName)
+	if err != nil {
+		return err
+	}
+
+	method := cf.FindMethod("main", "([Ljava/lang/String;)V")
 	if method == nil {
 		return fmt.Errorf("main method not found")
 	}
@@ -40,12 +57,24 @@ func (vm *VM) Execute() error {
 
 	// main(String[] args) — pass null for args
 	args := []Value{NullValue()}
-	_, err := vm.executeMethod(method, args)
+	_, err = vm.executeMethod(cf, method, args)
 	return err
 }
 
 // executeMethod executes a method with the given arguments and returns its return value.
-func (vm *VM) executeMethod(method *classfile.MethodInfo, args []Value) (Value, error) {
+func (vm *VM) executeMethod(cf *classfile.ClassFile, method *classfile.MethodInfo, args []Value) (Value, error) {
+	// Check for native method
+	if method.AccessFlags&AccNative != 0 {
+		className, _ := cf.ClassName()
+		return vm.executeNativeMethod(className, method.Name, method.Descriptor, args)
+	}
+
+	// Check for abstract method
+	if method.AccessFlags&AccAbstract != 0 {
+		className, _ := cf.ClassName()
+		return Value{}, fmt.Errorf("AbstractMethodError: %s.%s:%s", className, method.Name, method.Descriptor)
+	}
+
 	if method.Code == nil {
 		return Value{}, fmt.Errorf("method %s has no Code attribute", method.Name)
 	}
@@ -56,13 +85,14 @@ func (vm *VM) executeMethod(method *classfile.MethodInfo, args []Value) (Value, 
 	}
 	defer func() { vm.frameDepth-- }()
 
-	frame := NewFrame(method.Code.MaxLocals, method.Code.MaxStack, method.Code.Code, vm.ClassFile)
+	frame := NewFrame(method.Code.MaxLocals, method.Code.MaxStack, method.Code.Code, cf)
 
 	// Set arguments into local variables
 	for i, arg := range args {
 		frame.SetLocal(i, arg)
 	}
 
+	className, _ := cf.ClassName()
 	// Execution loop
 	for frame.PC < len(frame.Code) {
 		opcode := frame.Code[frame.PC]
@@ -70,7 +100,7 @@ func (vm *VM) executeMethod(method *classfile.MethodInfo, args []Value) (Value, 
 
 		retVal, hasReturn, err := vm.executeInstruction(frame, opcode)
 		if err != nil {
-			return Value{}, err
+			return Value{}, fmt.Errorf("in %s.%s:%s at PC=%d: %w", className, method.Name, method.Descriptor, frame.PC-1, err)
 		}
 		if hasReturn {
 			return retVal, nil
@@ -79,6 +109,263 @@ func (vm *VM) executeMethod(method *classfile.MethodInfo, args []Value) (Value, 
 
 	// Fell off the end of the method (implicit return for void methods)
 	return Value{}, nil
+}
+
+// executeNativeMethod dispatches native method calls.
+func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args []Value) (Value, error) {
+	key := className + "." + methodName + ":" + descriptor
+
+	switch key {
+	case "java/lang/Object.hashCode:()I":
+		obj, ok := args[0].Ref.(*JObject)
+		if !ok {
+			return Value{}, fmt.Errorf("Object.hashCode: receiver is not a JObject")
+		}
+		hash := int32(reflect.ValueOf(obj).Pointer() & 0x7FFFFFFF)
+		return IntValue(hash), nil
+
+	case "java/lang/Object.getClass:()Ljava/lang/Class;":
+		obj, ok := args[0].Ref.(*JObject)
+		if !ok {
+			return Value{}, fmt.Errorf("Object.getClass: receiver is not a JObject")
+		}
+		classObj := &JObject{
+			ClassName: "java/lang/Class",
+			Fields:    map[string]Value{"name": RefValue(obj.ClassName)},
+		}
+		return RefValue(classObj), nil
+
+	case "java/lang/Class.getPrimitiveClass:(Ljava/lang/String;)Ljava/lang/Class;":
+		name := ""
+		if args[0].Ref != nil {
+			name = fmt.Sprintf("%v", args[0].Ref)
+		}
+		classObj := &JObject{
+			ClassName: "java/lang/Class",
+			Fields:    map[string]Value{"name": RefValue(name)},
+		}
+		return RefValue(classObj), nil
+
+	case "java/lang/Class.desiredAssertionStatus0:(Ljava/lang/Class;)Z",
+		"java/lang/Class.desiredAssertionStatus:()Z":
+		return IntValue(0), nil
+
+	case "jdk/internal/misc/VM.getSavedProperty:(Ljava/lang/String;)Ljava/lang/String;":
+		return NullValue(), nil
+
+	case "jdk/internal/misc/CDS.initializeFromArchive:(Ljava/lang/Class;)V":
+		return Value{}, nil
+
+	case "jdk/internal/misc/CDS.isDumpingClassList0:()Z",
+		"jdk/internal/misc/CDS.isDumpingArchive0:()Z",
+		"jdk/internal/misc/CDS.isSharingEnabled0:()Z":
+		return IntValue(0), nil
+
+	case "java/lang/Float.floatToRawIntBits:(F)I":
+		return IntValue(int32(math.Float32bits(args[0].Float))), nil
+
+	case "java/lang/System.registerNatives:()V",
+		"java/lang/Object.registerNatives:()V",
+		"java/lang/Class.registerNatives:()V":
+		return Value{}, nil
+
+	case "java/lang/Float.isNaN:(F)Z":
+		return IntValue(0), nil
+
+	case "java/lang/String.intern:()Ljava/lang/String;":
+		return args[0], nil
+
+	case "jdk/internal/misc/Unsafe.getUnsafe:()Ljdk/internal/misc/Unsafe;":
+		obj := &JObject{ClassName: "jdk/internal/misc/Unsafe", Fields: make(map[string]Value)}
+		return RefValue(obj), nil
+
+	case "jdk/internal/misc/Unsafe.storeFence:()V":
+		return Value{}, nil
+
+	case "java/lang/Class.isArray:()Z":
+		return IntValue(0), nil
+
+	case "java/lang/Class.isPrimitive:()Z":
+		return IntValue(0), nil
+
+	case "jdk/internal/misc/Unsafe.arrayBaseOffset:(Ljava/lang/Class;)I":
+		return IntValue(0), nil
+
+	case "jdk/internal/misc/Unsafe.arrayIndexScale:(Ljava/lang/Class;)I":
+		return IntValue(1), nil
+
+	case "jdk/internal/misc/Unsafe.objectFieldOffset1:(Ljava/lang/Class;Ljava/lang/String;)J":
+		return LongValue(0), nil
+
+	case "jdk/internal/misc/VM.initialize:()V":
+		// Set savedProps to an empty HashMap so getSavedProperty doesn't NPE
+		propsObj := &JObject{ClassName: "java/util/HashMap", Fields: make(map[string]Value)}
+		vm.setStaticField("jdk/internal/misc/VM", "savedProps", RefValue(propsObj))
+		return Value{}, nil
+
+	case "java/lang/StringUTF16.isBigEndian:()Z":
+		return IntValue(0), nil
+
+	case "java/lang/System.arraycopy:(Ljava/lang/Object;ILjava/lang/Object;II)V":
+		return vm.nativeArraycopy(args)
+
+	case "java/lang/Class.forName0:(Ljava/lang/String;ZLjava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/Class;":
+		name := ""
+		if args[0].Ref != nil {
+			name = fmt.Sprintf("%v", args[0].Ref)
+		}
+		classObj := &JObject{
+			ClassName: "java/lang/Class",
+			Fields:    map[string]Value{"name": RefValue(name)},
+		}
+		return RefValue(classObj), nil
+
+	case "java/lang/Object.notifyAll:()V",
+		"java/lang/Object.notify:()V":
+		return Value{}, nil
+
+	case "java/lang/Thread.currentThread:()Ljava/lang/Thread;":
+		obj := &JObject{ClassName: "java/lang/Thread", Fields: make(map[string]Value)}
+		return RefValue(obj), nil
+
+	case "java/lang/Thread.setPriority:(I)V":
+		return Value{}, nil
+
+	case "java/lang/Runtime.maxMemory:()J":
+		return LongValue(256 * 1024 * 1024), nil
+
+	case "jdk/internal/misc/Unsafe.compareAndSetInt:(Ljava/lang/Object;JII)Z":
+		return IntValue(1), nil // pretend CAS always succeeds
+
+	case "jdk/internal/misc/Unsafe.compareAndSetLong:(Ljava/lang/Object;JJJ)Z":
+		return IntValue(1), nil
+
+	case "jdk/internal/misc/Unsafe.compareAndSetReference:(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z":
+		return IntValue(1), nil
+
+	case "jdk/internal/misc/Unsafe.getIntVolatile:(Ljava/lang/Object;J)I":
+		return IntValue(0), nil
+
+	case "jdk/internal/misc/Unsafe.getReferenceVolatile:(Ljava/lang/Object;J)Ljava/lang/Object;":
+		return NullValue(), nil
+
+	case "jdk/internal/misc/Unsafe.putReferenceVolatile:(Ljava/lang/Object;JLjava/lang/Object;)V":
+		return Value{}, nil
+
+	case "jdk/internal/misc/Unsafe.getObjectSize:(Ljava/lang/Object;)J":
+		return LongValue(16), nil
+
+	case "java/lang/Class.getComponentType:()Ljava/lang/Class;":
+		return NullValue(), nil
+
+	case "java/lang/Class.isAssignableFrom:(Ljava/lang/Class;)Z":
+		return IntValue(1), nil
+	}
+
+	// registerNatives pattern
+	if methodName == "registerNatives" && descriptor == "()V" {
+		return Value{}, nil
+	}
+	// initIDs pattern (used by many JDK classes)
+	if methodName == "initIDs" && descriptor == "()V" {
+		return Value{}, nil
+	}
+
+	return Value{}, fmt.Errorf("native method not implemented: %s.%s:%s", className, methodName, descriptor)
+}
+
+// ensureInitialized runs <clinit> for a class if it hasn't been run yet.
+func (vm *VM) ensureInitialized(className string) error {
+	if vm.initializedClasses[className] {
+		return nil
+	}
+	vm.initializedClasses[className] = true // set before to prevent recursion
+
+	cf, err := vm.ClassLoader.LoadClass(className)
+	if err != nil {
+		vm.initializedClasses[className] = false
+		return nil // class not found is OK for initialization
+	}
+
+	// Initialize superclass first
+	superName := cf.SuperClassName()
+	if superName != "" {
+		if err := vm.ensureInitialized(superName); err != nil {
+			return err
+		}
+	}
+
+	// Run <clinit> if present
+	clinit := cf.FindMethod("<clinit>", "()V")
+	if clinit != nil {
+		_, err := vm.executeMethod(cf, clinit, nil)
+		if err != nil {
+			return fmt.Errorf("error in <clinit> of %s: %w", className, err)
+		}
+	}
+	return nil
+}
+
+// getStaticField returns the value of a static field.
+func (vm *VM) getStaticField(className, fieldName string) Value {
+	if fields, ok := vm.staticFields[className]; ok {
+		if val, ok := fields[fieldName]; ok {
+			return val
+		}
+	}
+	return Value{} // default zero value
+}
+
+// getStaticFieldOk returns the value and whether it was set.
+func (vm *VM) getStaticFieldOk(className, fieldName string) (Value, bool) {
+	if fields, ok := vm.staticFields[className]; ok {
+		if val, ok := fields[fieldName]; ok {
+			return val, true
+		}
+	}
+	return Value{}, false
+}
+
+// defaultValueForDescriptor returns the default value for a field based on its descriptor.
+func defaultValueForDescriptor(descriptor string) Value {
+	if len(descriptor) == 0 {
+		return NullValue()
+	}
+	switch descriptor[0] {
+	case 'L', '[':
+		return NullValue()
+	case 'F':
+		return FloatValue(0)
+	case 'J':
+		return LongValue(0)
+	default:
+		return IntValue(0)
+	}
+}
+
+// setStaticField sets the value of a static field.
+func (vm *VM) setStaticField(className, fieldName string, val Value) {
+	if _, ok := vm.staticFields[className]; !ok {
+		vm.staticFields[className] = make(map[string]Value)
+	}
+	vm.staticFields[className][fieldName] = val
+}
+
+// resolveMethod resolves a method from its class name, walking up the class hierarchy.
+func (vm *VM) resolveMethod(className, methodName, descriptor string) (*classfile.ClassFile, *classfile.MethodInfo, error) {
+	current := className
+	for current != "" {
+		cf, err := vm.ClassLoader.LoadClass(current)
+		if err != nil {
+			return nil, nil, err
+		}
+		method := cf.FindMethod(methodName, descriptor)
+		if method != nil {
+			return cf, method, nil
+		}
+		current = cf.SuperClassName()
+	}
+	return nil, nil, fmt.Errorf("method %s.%s:%s not found", className, methodName, descriptor)
 }
 
 // executeLdc handles the ldc instruction.
@@ -92,12 +379,24 @@ func (vm *VM) executeLdc(frame *Frame, index uint16) (Value, bool, error) {
 	switch c := entry.(type) {
 	case *classfile.ConstantInteger:
 		frame.Push(IntValue(c.Value))
+	case *classfile.ConstantFloat:
+		frame.Push(FloatValue(c.Value))
 	case *classfile.ConstantString:
 		str, err := classfile.GetUtf8(pool, c.StringIndex)
 		if err != nil {
 			return Value{}, false, fmt.Errorf("ldc: resolving string: %w", err)
 		}
 		frame.Push(RefValue(str))
+	case *classfile.ConstantClass:
+		name, err := classfile.GetUtf8(pool, c.NameIndex)
+		if err != nil {
+			return Value{}, false, fmt.Errorf("ldc: resolving class name: %w", err)
+		}
+		classObj := &JObject{
+			ClassName: "java/lang/Class",
+			Fields:    map[string]Value{"name": RefValue(name)},
+		}
+		frame.Push(RefValue(classObj))
 	default:
 		return Value{}, false, fmt.Errorf("ldc: unsupported constant pool entry type at index %d (tag=%d)", index, entry.Tag())
 	}
@@ -115,13 +414,42 @@ func (vm *VM) executeGetstatic(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("getstatic: %w", err)
 	}
 
+	if err := vm.ensureInitialized(fieldRef.ClassName); err != nil {
+		return Value{}, false, fmt.Errorf("getstatic: initializing %s: %w", fieldRef.ClassName, err)
+	}
+
 	// Handle java/lang/System.out
 	if fieldRef.ClassName == "java/lang/System" && fieldRef.FieldName == "out" {
 		frame.Push(RefValue(&native.PrintStream{Writer: vm.Stdout}))
 		return Value{}, false, nil
 	}
 
-	return Value{}, false, fmt.Errorf("getstatic: unsupported field %s.%s:%s", fieldRef.ClassName, fieldRef.FieldName, fieldRef.Descriptor)
+	val, ok := vm.getStaticFieldOk(fieldRef.ClassName, fieldRef.FieldName)
+	if !ok {
+		// Field never set: return type-appropriate default
+		val = defaultValueForDescriptor(fieldRef.Descriptor)
+	}
+	frame.Push(val)
+	return Value{}, false, nil
+}
+
+// executePutstatic handles the putstatic instruction.
+func (vm *VM) executePutstatic(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	pool := frame.Class.ConstantPool
+
+	fieldRef, err := classfile.ResolveFieldref(pool, index)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("putstatic: %w", err)
+	}
+
+	if err := vm.ensureInitialized(fieldRef.ClassName); err != nil {
+		return Value{}, false, fmt.Errorf("putstatic: initializing %s: %w", fieldRef.ClassName, err)
+	}
+
+	value := frame.Pop()
+	vm.setStaticField(fieldRef.ClassName, fieldRef.FieldName, value)
+	return Value{}, false, nil
 }
 
 // executeGetfield handles the getfield instruction.
@@ -145,7 +473,7 @@ func (vm *VM) executeGetfield(frame *Frame) (Value, bool, error) {
 
 	val, exists := obj.Fields[fieldRef.FieldName]
 	if !exists {
-		frame.Push(NullValue())
+		frame.Push(defaultValueForDescriptor(fieldRef.Descriptor))
 	} else {
 		frame.Push(val)
 	}
@@ -197,82 +525,83 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 	}
 	objectRef := frame.Pop()
 
-	// PrintStream.println
-	if methodRef.ClassName == "java/io/PrintStream" && methodRef.MethodName == "println" {
+	// PrintStream.println / print (native I/O)
+	if methodRef.ClassName == "java/io/PrintStream" {
 		ps, ok := objectRef.Ref.(*native.PrintStream)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: println receiver is not a PrintStream")
+		if ok {
+			return vm.handlePrintStream(frame, ps, methodRef.MethodName, methodRef.Descriptor, args)
 		}
-		switch methodRef.Descriptor {
+	}
+
+	if objectRef.Type == TypeNull || objectRef.Ref == nil {
+		return Value{}, false, fmt.Errorf("invokevirtual: NullPointerException calling %s.%s", methodRef.ClassName, methodRef.MethodName)
+	}
+
+	// JObject method resolution via ClassLoader
+	obj, ok := objectRef.Ref.(*JObject)
+	if !ok {
+		return Value{}, false, fmt.Errorf("invokevirtual: receiver is not a JObject for method %s.%s", methodRef.ClassName, methodRef.MethodName)
+	}
+
+	cf, method, err := vm.resolveMethod(obj.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, err
+	}
+
+	fullArgs := make([]Value, 0, len(args)+1)
+	fullArgs = append(fullArgs, objectRef)
+	fullArgs = append(fullArgs, args...)
+	retVal, err := vm.executeMethod(cf, method, fullArgs)
+	if err != nil {
+		return Value{}, false, err
+	}
+	if !isVoidReturn(methodRef.Descriptor) {
+		frame.Push(retVal)
+	}
+	return Value{}, false, nil
+}
+
+// handlePrintStream handles PrintStream method calls.
+func (vm *VM) handlePrintStream(frame *Frame, ps *native.PrintStream, methodName, descriptor string, args []Value) (Value, bool, error) {
+	if methodName == "println" {
+		switch descriptor {
 		case "(I)V":
 			ps.Println(args[0].Int)
 		case "(Ljava/lang/String;)V":
 			ps.Println(args[0].Ref)
+		case "(Ljava/lang/Object;)V":
+			if args[0].Type == TypeNull {
+				ps.Println("null")
+			} else if obj, ok := args[0].Ref.(*JObject); ok {
+				// Try to call toString or use a reasonable default
+				val, exists := obj.Fields["value"]
+				if exists {
+					ps.Println(val.Int)
+				} else {
+					ps.Println(obj.ClassName)
+				}
+			} else {
+				ps.Println(args[0].Ref)
+			}
 		case "()V":
 			ps.Println()
 		default:
-			return Value{}, false, fmt.Errorf("invokevirtual: unsupported println descriptor %s", methodRef.Descriptor)
+			return Value{}, false, fmt.Errorf("invokevirtual: unsupported println descriptor %s", descriptor)
 		}
 		return Value{}, false, nil
 	}
-
-	// HashMap.get
-	if methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "get" {
-		hm, ok := objectRef.Ref.(*native.NativeHashMap)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: HashMap.get receiver is not a NativeHashMap")
-		}
-		result := hm.Get(args[0].Ref)
-		if result == nil {
-			frame.Push(NullValue())
-		} else {
-			frame.Push(RefValue(result))
+	if methodName == "print" {
+		switch descriptor {
+		case "(I)V":
+			fmt.Fprintf(ps.Writer, "%d", args[0].Int)
+		case "(Ljava/lang/String;)V":
+			fmt.Fprintf(ps.Writer, "%v", args[0].Ref)
+		default:
+			return Value{}, false, fmt.Errorf("invokevirtual: unsupported print descriptor %s", descriptor)
 		}
 		return Value{}, false, nil
 	}
-
-	// HashMap.put
-	if methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "put" {
-		hm, ok := objectRef.Ref.(*native.NativeHashMap)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: HashMap.put receiver is not a NativeHashMap")
-		}
-		old := hm.Put(args[0].Ref, args[1].Ref)
-		if old == nil {
-			frame.Push(NullValue())
-		} else {
-			frame.Push(RefValue(old))
-		}
-		return Value{}, false, nil
-	}
-
-	// Integer.intValue
-	if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "intValue" {
-		ni, ok := objectRef.Ref.(*native.NativeInteger)
-		if !ok {
-			return Value{}, false, fmt.Errorf("invokevirtual: Integer.intValue receiver is not a NativeInteger")
-		}
-		frame.Push(IntValue(ni.Value))
-		return Value{}, false, nil
-	}
-
-	// User-defined method (e.g., Fib.fib)
-	method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
-	if method != nil {
-		fullArgs := make([]Value, 0, len(args)+1)
-		fullArgs = append(fullArgs, objectRef)
-		fullArgs = append(fullArgs, args...)
-		retVal, err := vm.executeMethod(method, fullArgs)
-		if err != nil {
-			return Value{}, false, err
-		}
-		if !isVoidReturn(methodRef.Descriptor) {
-			frame.Push(retVal)
-		}
-		return Value{}, false, nil
-	}
-
-	return Value{}, false, fmt.Errorf("invokevirtual: unsupported method %s.%s:%s", methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	return Value{}, false, fmt.Errorf("invokevirtual: unsupported PrintStream method %s:%s", methodName, descriptor)
 }
 
 // executeInvokespecial handles the invokespecial instruction.
@@ -296,24 +625,26 @@ func (vm *VM) executeInvokespecial(frame *Frame) (Value, bool, error) {
 	}
 	objectRef := frame.Pop() // this
 
-	switch {
-	case methodRef.ClassName == "java/lang/Object" && methodRef.MethodName == "<init>":
-		// no-op
-	case methodRef.ClassName == "java/util/HashMap" && methodRef.MethodName == "<init>":
-		// HashMap already initialized in new, no-op
-	default:
-		// User class constructor
-		method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
-		if method == nil {
-			return Value{}, false, fmt.Errorf("invokespecial: method %s:%s not found", methodRef.MethodName, methodRef.Descriptor)
-		}
-		fullArgs := make([]Value, 0, len(args)+1)
-		fullArgs = append(fullArgs, objectRef)
-		fullArgs = append(fullArgs, args...)
-		_, err = vm.executeMethod(method, fullArgs)
-		if err != nil {
-			return Value{}, false, err
-		}
+	// Object.<init> is a no-op
+	if methodRef.ClassName == "java/lang/Object" && methodRef.MethodName == "<init>" {
+		return Value{}, false, nil
+	}
+
+	// Resolve method from class loader
+	cf, method, err := vm.resolveMethod(methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, err
+	}
+
+	fullArgs := make([]Value, 0, len(args)+1)
+	fullArgs = append(fullArgs, objectRef)
+	fullArgs = append(fullArgs, args...)
+	retVal, err := vm.executeMethod(cf, method, fullArgs)
+	if err != nil {
+		return Value{}, false, err
+	}
+	if !isVoidReturn(methodRef.Descriptor) {
+		frame.Push(retVal)
 	}
 	return Value{}, false, nil
 }
@@ -328,17 +659,8 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokestatic: %w", err)
 	}
 
-	// Native static methods
-	if methodRef.ClassName == "java/lang/Integer" && methodRef.MethodName == "valueOf" {
-		intVal := frame.Pop()
-		frame.Push(RefValue(native.IntegerValueOf(intVal.Int)))
-		return Value{}, false, nil
-	}
-
-	// Find the method in the current class
-	method := frame.Class.FindMethod(methodRef.MethodName, methodRef.Descriptor)
-	if method == nil {
-		return Value{}, false, fmt.Errorf("invokestatic: method %s:%s not found in class %s", methodRef.MethodName, methodRef.Descriptor, methodRef.ClassName)
+	if err := vm.ensureInitialized(methodRef.ClassName); err != nil {
+		return Value{}, false, fmt.Errorf("invokestatic: initializing %s: %w", methodRef.ClassName, err)
 	}
 
 	// Count parameters from descriptor
@@ -353,8 +675,14 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		args[i] = frame.Pop()
 	}
 
+	// Resolve method from class loader
+	cf, method, err := vm.resolveMethod(methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, err
+	}
+
 	// Execute the method
-	retVal, err := vm.executeMethod(method, args)
+	retVal, err := vm.executeMethod(cf, method, args)
 	if err != nil {
 		return Value{}, false, err
 	}
@@ -364,6 +692,69 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		frame.Push(retVal)
 	}
 
+	return Value{}, false, nil
+}
+
+// executeInvokeinterface handles the invokeinterface instruction.
+func (vm *VM) executeInvokeinterface(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	_ = frame.ReadU8() // count (unused)
+	_ = frame.ReadU8() // reserved (0)
+
+	pool := frame.Class.ConstantPool
+
+	methodRef, err := classfile.ResolveInterfaceMethodref(pool, index)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokeinterface: %w", err)
+	}
+
+	paramCount, err := countParams(methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, fmt.Errorf("invokeinterface: %w", err)
+	}
+
+	args := make([]Value, paramCount)
+	for i := paramCount - 1; i >= 0; i-- {
+		args[i] = frame.Pop()
+	}
+	objectRef := frame.Pop()
+
+	if objectRef.Type == TypeNull || objectRef.Ref == nil {
+		return Value{}, false, fmt.Errorf("invokeinterface: NullPointerException calling %s.%s:%s", methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	}
+
+	obj, ok := objectRef.Ref.(*JObject)
+	if !ok {
+		// Handle string receiver for methods like equals
+		if _, isStr := objectRef.Ref.(string); isStr && methodRef.MethodName == "equals" {
+			if len(args) == 1 {
+				otherStr, ok2 := args[0].Ref.(string)
+				if ok2 && objectRef.Ref.(string) == otherStr {
+					frame.Push(IntValue(1))
+				} else {
+					frame.Push(IntValue(0))
+				}
+				return Value{}, false, nil
+			}
+		}
+		return Value{}, false, fmt.Errorf("invokeinterface: receiver is not a JObject for %s.%s", methodRef.ClassName, methodRef.MethodName)
+	}
+
+	cf, method, err := vm.resolveMethod(obj.ClassName, methodRef.MethodName, methodRef.Descriptor)
+	if err != nil {
+		return Value{}, false, err
+	}
+
+	fullArgs := make([]Value, 0, len(args)+1)
+	fullArgs = append(fullArgs, objectRef)
+	fullArgs = append(fullArgs, args...)
+	retVal, err := vm.executeMethod(cf, method, fullArgs)
+	if err != nil {
+		return Value{}, false, err
+	}
+	if !isVoidReturn(methodRef.Descriptor) {
+		frame.Push(retVal)
+	}
 	return Value{}, false, nil
 }
 
@@ -377,13 +768,12 @@ func (vm *VM) executeNew(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("new: %w", err)
 	}
 
-	switch className {
-	case "java/util/HashMap":
-		frame.Push(RefValue(native.NewNativeHashMap()))
-	default:
-		obj := &JObject{ClassName: className, Fields: make(map[string]Value)}
-		frame.Push(RefValue(obj))
+	if err := vm.ensureInitialized(className); err != nil {
+		return Value{}, false, fmt.Errorf("new: initializing %s: %w", className, err)
 	}
+
+	obj := &JObject{ClassName: className, Fields: make(map[string]Value)}
+	frame.Push(RefValue(obj))
 	return Value{}, false, nil
 }
 
@@ -430,6 +820,36 @@ func countParams(descriptor string) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+// nativeArraycopy implements System.arraycopy.
+func (vm *VM) nativeArraycopy(args []Value) (Value, error) {
+	srcRef := args[0]
+	srcPos := int(args[1].Int)
+	destRef := args[2]
+	destPos := int(args[3].Int)
+	length := int(args[4].Int)
+
+	if srcRef.Type == TypeNull || destRef.Type == TypeNull {
+		return Value{}, fmt.Errorf("NullPointerException: arraycopy")
+	}
+
+	srcArr, ok1 := srcRef.Ref.(*JArray)
+	destArr, ok2 := destRef.Ref.(*JArray)
+	if !ok1 || !ok2 {
+		return Value{}, fmt.Errorf("ArrayStoreException: arraycopy")
+	}
+
+	if srcPos < 0 || destPos < 0 || length < 0 ||
+		srcPos+length > len(srcArr.Elements) ||
+		destPos+length > len(destArr.Elements) {
+		return Value{}, fmt.Errorf("ArrayIndexOutOfBoundsException: arraycopy")
+	}
+
+	for i := 0; i < length; i++ {
+		destArr.Elements[destPos+i] = srcArr.Elements[srcPos+i]
+	}
+	return Value{}, nil
 }
 
 // isVoidReturn checks if a method descriptor has void return type.

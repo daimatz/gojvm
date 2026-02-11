@@ -20,6 +20,19 @@ type ClassFile struct {
 	Methods      []MethodInfo
 }
 
+// SuperClassName returns the fully qualified name of the super class.
+// Returns "" if this is java/lang/Object (SuperClass == 0).
+func (cf *ClassFile) SuperClassName() string {
+	if cf.SuperClass == 0 {
+		return ""
+	}
+	name, err := GetClassName(cf.ConstantPool, cf.SuperClass)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
 // ConstantPoolEntry is an interface implemented by all constant pool types.
 type ConstantPoolEntry interface {
 	Tag() uint8
@@ -36,6 +49,24 @@ type ConstantInteger struct {
 }
 
 func (c *ConstantInteger) Tag() uint8 { return TagInteger }
+
+type ConstantFloat struct {
+	Value float32
+}
+
+func (c *ConstantFloat) Tag() uint8 { return TagFloat }
+
+type ConstantLong struct {
+	Value int64
+}
+
+func (c *ConstantLong) Tag() uint8 { return TagLong }
+
+type ConstantDouble struct {
+	Value float64
+}
+
+func (c *ConstantDouble) Tag() uint8 { return TagDouble }
 
 type ConstantClass struct {
 	NameIndex uint16
@@ -62,6 +93,13 @@ type ConstantMethodref struct {
 }
 
 func (c *ConstantMethodref) Tag() uint8 { return TagMethodref }
+
+type ConstantInterfaceMethodref struct {
+	ClassIndex       uint16
+	NameAndTypeIndex uint16
+}
+
+func (c *ConstantInterfaceMethodref) Tag() uint8 { return TagInterfaceMethodref }
 
 type ConstantNameAndType struct {
 	NameIndex       uint16
@@ -93,9 +131,18 @@ type AttributeInfo struct {
 	Data []byte
 }
 
+// ExceptionHandler represents an entry in the exception table.
+type ExceptionHandler struct {
+	StartPC   uint16
+	EndPC     uint16
+	HandlerPC uint16
+	CatchType uint16
+}
+
 // CodeAttribute represents the Code attribute of a method.
 type CodeAttribute struct {
-	MaxStack  uint16
-	MaxLocals uint16
-	Code      []byte
+	MaxStack          uint16
+	MaxLocals         uint16
+	Code              []byte
+	ExceptionHandlers []ExceptionHandler
 }

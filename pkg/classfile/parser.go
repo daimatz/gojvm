@@ -4,9 +4,20 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 )
 
 const classMagic = 0xCAFEBABE
+
+// ParseFile opens and parses a .class file from the given path.
+func ParseFile(path string) (*ClassFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return Parse(f)
+}
 
 // Parse reads a .class file from the given reader and returns a ClassFile.
 func Parse(r io.Reader) (*ClassFile, error) {
@@ -229,10 +240,32 @@ func parseCodeAttribute(data []byte) (*CodeAttribute, error) {
 	code := make([]byte, codeLength)
 	copy(code, data[8:8+codeLength])
 
+	// Parse exception table
+	offset := 8 + int(codeLength)
+	var handlers []ExceptionHandler
+	if offset+2 <= len(data) {
+		exTableLen := binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
+		handlers = make([]ExceptionHandler, exTableLen)
+		for i := uint16(0); i < exTableLen; i++ {
+			if offset+8 > len(data) {
+				break
+			}
+			handlers[i] = ExceptionHandler{
+				StartPC:   binary.BigEndian.Uint16(data[offset : offset+2]),
+				EndPC:     binary.BigEndian.Uint16(data[offset+2 : offset+4]),
+				HandlerPC: binary.BigEndian.Uint16(data[offset+4 : offset+6]),
+				CatchType: binary.BigEndian.Uint16(data[offset+6 : offset+8]),
+			}
+			offset += 8
+		}
+	}
+
 	return &CodeAttribute{
-		MaxStack:  maxStack,
-		MaxLocals: maxLocals,
-		Code:      code,
+		MaxStack:          maxStack,
+		MaxLocals:         maxLocals,
+		Code:              code,
+		ExceptionHandlers: handlers,
 	}, nil
 }
 

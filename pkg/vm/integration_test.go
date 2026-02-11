@@ -303,3 +303,67 @@ func TestNestedLoop(t *testing.T) {
 		t.Errorf("NestedLoop output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestBitwiseOps(t *testing.T) {
+	got := runClass(t, "../../testdata/BitwiseOps.class")
+	want := "8\n14\n6\n-1\n1024\n-32\n1073741792\n1099511627776\n1048576\n"
+	if got != want {
+		t.Errorf("BitwiseOps output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestFloatArith(t *testing.T) {
+	got := runClass(t, "../../testdata/FloatArith.class")
+	want := "5\n1\n7\n1\n100\n1\n15\n"
+	if got != want {
+		t.Errorf("FloatArith output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestRecursiveDS(t *testing.T) {
+	got := runClass(t, "../../testdata/RecursiveDS.class")
+	want := "6\n3\n2\n1\n3628800\n"
+	if got != want {
+		t.Errorf("RecursiveDS output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestComparableTest(t *testing.T) {
+	got := runClass(t, "../../testdata/ComparableTest.class")
+	want := "Alice:95\nDiana:90\nBob:85\nCharlie:85\n"
+	if got != want {
+		t.Errorf("ComparableTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStringBuilderTest(t *testing.T) {
+	got := runClass(t, "../../testdata/StringBuilderTest.class")
+	want := "Hello World\nn=42,pi=3.14\n11\nH\nabc\n"
+	if got != want {
+		t.Errorf("StringBuilderTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestMathTest(t *testing.T) {
+	got := runClass(t, "../../testdata/MathTest.class")
+	want := "42\n10\n7\n3\n1024\n5\n3\n4\n"
+	if got != want {
+		t.Errorf("MathTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestArrayCopyTest(t *testing.T) {
+	got := runClass(t, "../../testdata/ArrayCopyTest.class")
+	want := "1\n2\n3\n4\n5\n20\n50\nBob\n"
+	if got != want {
+		t.Errorf("ArrayCopyTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestExceptionChain(t *testing.T) {
+	got := runClass(t, "../../testdata/ExceptionChain.class")
+	want := "ok:20\nillegal:zero\nruntime:negative\nfinally1\ninner\ncaught\n"
+	if got != want {
+		t.Errorf("ExceptionChain output:\ngot  %q\nwant %q", got, want)
+	}
+}

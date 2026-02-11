@@ -200,6 +200,15 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 	case "java/lang/Math.pow:(DD)D":
 		return DoubleValue(math.Pow(args[0].Double, args[1].Double)), nil
 
+	case "java/lang/StrictMath.sqrt:(D)D":
+		return DoubleValue(math.Sqrt(args[0].Double)), nil
+	case "java/lang/StrictMath.floor:(D)D",
+		"java/lang/Math.floor:(D)D":
+		return DoubleValue(math.Floor(args[0].Double)), nil
+	case "java/lang/StrictMath.ceil:(D)D",
+		"java/lang/Math.ceil:(D)D":
+		return DoubleValue(math.Ceil(args[0].Double)), nil
+
 	case "java/lang/System.registerNatives:()V",
 		"java/lang/Object.registerNatives:()V",
 		"java/lang/Class.registerNatives:()V":

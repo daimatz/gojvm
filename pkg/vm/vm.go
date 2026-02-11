@@ -88,9 +88,15 @@ func (vm *VM) executeMethod(cf *classfile.ClassFile, method *classfile.MethodInf
 
 	frame := NewFrame(method.Code.MaxLocals, method.Code.MaxStack, method.Code.Code, cf)
 
-	// Set arguments into local variables
-	for i, arg := range args {
-		frame.SetLocal(i, arg)
+	// Set arguments into local variables.
+	// Long and double values occupy two slots per JVM spec.
+	slot := 0
+	for _, arg := range args {
+		frame.SetLocal(slot, arg)
+		slot++
+		if arg.Type == TypeLong || arg.Type == TypeDouble {
+			slot++ // category 2 types use two local variable slots
+		}
 	}
 
 	className, _ := cf.ClassName()
@@ -198,6 +204,10 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 		"java/lang/Object.registerNatives:()V",
 		"java/lang/Class.registerNatives:()V":
 		return Value{}, nil
+
+	case "java/lang/Throwable.fillInStackTrace:(I)Ljava/lang/Throwable;":
+		// Return this (args[0]) — stack trace recording not supported
+		return args[0], nil
 
 	case "java/lang/Float.isNaN:(F)Z":
 		return IntValue(0), nil

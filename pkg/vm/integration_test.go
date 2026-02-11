@@ -239,3 +239,35 @@ func TestCollectionsSort(t *testing.T) {
 		t.Errorf("CollectionsSort output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestVarargs(t *testing.T) {
+	got := runClass(t, "../../testdata/Varargs.class")
+	want := "6\n100\na, b, c\n"
+	if got != want {
+		t.Errorf("Varargs output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestCustomIterator(t *testing.T) {
+	got := runClass(t, "../../testdata/CustomIterator.class")
+	want := "X\nY\nZ\n"
+	if got != want {
+		t.Errorf("CustomIterator output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestAbstractClass(t *testing.T) {
+	got := runClass(t, "../../testdata/AbstractClass.class")
+	want := "Circle: 78.53975\nRect: 12.0\ntrue\ntrue\n"
+	if got != want {
+		t.Errorf("AbstractClass output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStackTrace(t *testing.T) {
+	got := runClass(t, "../../testdata/StackTrace.class")
+	want := "120\nnegative: -1\n"
+	if got != want {
+		t.Errorf("StackTrace output:\ngot  %q\nwant %q", got, want)
+	}
+}

@@ -645,6 +645,17 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		}
 	}
 
+	// Handle array clone
+	if arr, ok := objectRef.Ref.(*JArray); ok {
+		if methodRef.MethodName == "clone" {
+			newElements := make([]Value, len(arr.Elements))
+			copy(newElements, arr.Elements)
+			newArr := &JArray{Elements: newElements}
+			frame.Push(RefValue(newArr))
+			return Value{}, false, nil
+		}
+	}
+
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
 		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}

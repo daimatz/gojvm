@@ -196,6 +196,8 @@ const (
 	OpAthrow        = 0xBF
 	OpCheckcast     = 0xC0
 	OpInstanceof    = 0xC1
+	OpMonitorenter  = 0xC2
+	OpMonitorexit   = 0xC3
 	OpInvokedynamic   = 0xBA
 	OpIfnull        = 0xC6
 	OpIfnonnull     = 0xC7
@@ -1033,7 +1035,9 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		}
 		val := frame.Peek()
 		if val.Type != TypeNull {
-			if obj, ok := val.Ref.(*JObject); ok {
+			if className[0] == '[' {
+				// array checkcast - pass through for now
+			} else if obj, ok := val.Ref.(*JObject); ok {
 				if !vm.isInstanceOf(obj.ClassName, className) {
 					return Value{}, false, NewJavaException("java/lang/ClassCastException")
 				}
@@ -1055,6 +1059,11 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		} else {
 			frame.Push(IntValue(0))
 		}
+
+	case OpMonitorenter:
+		frame.Pop() // pop object reference, no-op for single-threaded
+	case OpMonitorexit:
+		frame.Pop() // pop object reference, no-op for single-threaded
 
 	case OpIfnull:
 		branchPC := frame.PC - 1

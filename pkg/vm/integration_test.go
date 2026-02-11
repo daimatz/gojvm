@@ -159,3 +159,19 @@ func TestStringConcat2(t *testing.T) {
 		t.Errorf("StringConcat2 output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestFinally(t *testing.T) {
+	got := runClass(t, "../../testdata/Finally.class")
+	want := "1\n2\n3\n4\n5\n10\n"
+	if got != want {
+		t.Errorf("Finally output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestEnumTest(t *testing.T) {
+	got := runClass(t, "../../testdata/EnumTest.class")
+	want := "1\nGREEN\n3\n"
+	if got != want {
+		t.Errorf("EnumTest output:\ngot  %q\nwant %q", got, want)
+	}
+}

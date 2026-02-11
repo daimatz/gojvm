@@ -399,3 +399,35 @@ func TestObjectMethods(t *testing.T) {
 		t.Errorf("ObjectMethods output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestTreeTraversal(t *testing.T) {
+	got := runClass(t, "../../testdata/TreeTraversal.class")
+	want := "1\n2\n3\n4\n5\n6\n7\n3\n7\n"
+	if got != want {
+		t.Errorf("TreeTraversal output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestFunctionalTest(t *testing.T) {
+	got := runClass(t, "../../testdata/FunctionalTest.class")
+	want := "2,4,6,8,10\n4,16,36,64,100\n220\n12,14,16,18,20\n"
+	if got != want {
+		t.Errorf("FunctionalTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestMultiCatch(t *testing.T) {
+	got := runClass(t, "../../testdata/MultiCatch.class")
+	want := "4\n15\ncaught:bad arg\ncaught:unsupported\n2\npositive\nnegative\nzero\n"
+	if got != want {
+		t.Errorf("MultiCatch output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestArraysSortTest(t *testing.T) {
+	got := runClass(t, "../../testdata/ArraysSortTest.class")
+	want := "1\n2\n3\n4\n5\n6\n7\n8\n4\nAlice\nBob\nCharlie\n"
+	if got != want {
+		t.Errorf("ArraysSortTest output:\ngot  %q\nwant %q", got, want)
+	}
+}

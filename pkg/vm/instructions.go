@@ -922,18 +922,19 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		defaultOffset := frame.ReadI32()
 		npairs := frame.ReadI32()
 		key := frame.Pop().Int
-		matched := false
+		// Read all pairs first, then set PC (to avoid corrupting PC after jump)
+		type switchPair struct {
+			matchVal, offset int32
+		}
+		pairs := make([]switchPair, npairs)
 		for i := int32(0); i < npairs; i++ {
-			matchVal := frame.ReadI32()
-			offset := frame.ReadI32()
-			if key == matchVal {
-				frame.PC = opcodePC + int(offset)
+			pairs[i] = switchPair{frame.ReadI32(), frame.ReadI32()}
+		}
+		matched := false
+		for _, p := range pairs {
+			if key == p.matchVal {
+				frame.PC = opcodePC + int(p.offset)
 				matched = true
-				// skip remaining pairs
-				for j := i + 1; j < npairs; j++ {
-					frame.ReadI32()
-					frame.ReadI32()
-				}
 				break
 			}
 		}

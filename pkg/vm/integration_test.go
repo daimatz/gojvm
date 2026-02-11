@@ -175,3 +175,27 @@ func TestEnumTest(t *testing.T) {
 		t.Errorf("EnumTest output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestForEach(t *testing.T) {
+	got := runClass(t, "../../testdata/ForEach.class")
+	want := "60\nHello\nWorld\n"
+	if got != want {
+		t.Errorf("ForEach output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStringMethods(t *testing.T) {
+	got := runClass(t, "../../testdata/StringMethods.class")
+	want := "13\nH\nWorld!\nHello\n7\ntrue\ntrue\nfalse\nHELLO, WORLD!\nhello, world!\nHello, World!\nhi\nHello; World!\n42\nfalse\ntrue\n"
+	if got != want {
+		t.Errorf("StringMethods output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestArrayListTest(t *testing.T) {
+	got := runClass(t, "../../testdata/ArrayListTest.class")
+	want := "3\nAlice\nCharlie\nBeth\nAlice\nBeth\nCharlie\n"
+	if got != want {
+		t.Errorf("ArrayListTest output:\ngot  %q\nwant %q", got, want)
+	}
+}

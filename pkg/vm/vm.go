@@ -656,6 +656,18 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		}
 	}
 
+	// Handle String methods natively (strings are stored as Go string, not JObject)
+	if str, ok := objectRef.Ref.(string); ok {
+		retVal, err := vm.handleStringMethod(str, methodRef.MethodName, methodRef.Descriptor, args)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
+	}
+
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
 		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
@@ -882,6 +894,16 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 		args[i] = frame.Pop()
 	}
 
+	// Handle String.valueOf natively
+	if methodRef.ClassName == "java/lang/String" && methodRef.MethodName == "valueOf" {
+		retVal, err := vm.handleStringValueOf(methodRef.Descriptor, args)
+		if err != nil {
+			return Value{}, false, err
+		}
+		frame.Push(retVal)
+		return Value{}, false, nil
+	}
+
 	// Resolve method from class loader
 	cf, method, err := vm.resolveMethod(methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
 	if err != nil {
@@ -930,20 +952,20 @@ func (vm *VM) executeInvokeinterface(frame *Frame) (Value, bool, error) {
 		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 
+	// Handle String methods natively via interface dispatch
+	if str, isStr := objectRef.Ref.(string); isStr {
+		retVal, err := vm.handleStringMethod(str, methodRef.MethodName, methodRef.Descriptor, args)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
+	}
+
 	obj, ok := objectRef.Ref.(*JObject)
 	if !ok {
-		// Handle string receiver for methods like equals
-		if _, isStr := objectRef.Ref.(string); isStr && methodRef.MethodName == "equals" {
-			if len(args) == 1 {
-				otherStr, ok2 := args[0].Ref.(string)
-				if ok2 && objectRef.Ref.(string) == otherStr {
-					frame.Push(IntValue(1))
-				} else {
-					frame.Push(IntValue(0))
-				}
-				return Value{}, false, nil
-			}
-		}
 		return Value{}, false, fmt.Errorf("invokeinterface: receiver is not a JObject for %s.%s", methodRef.ClassName, methodRef.MethodName)
 	}
 
@@ -1379,4 +1401,150 @@ func (vm *VM) handleStringBuilder(objectRef Value, methodName, descriptor string
 	}
 
 	return Value{}, false, fmt.Errorf("StringBuilder: unsupported method %s:%s", methodName, descriptor)
+}
+
+// handleStringMethod handles String instance method calls natively.
+func (vm *VM) handleStringMethod(str, methodName, descriptor string, args []Value) (Value, error) {
+	switch methodName {
+	case "length":
+		return IntValue(int32(len(str))), nil
+	case "charAt":
+		idx := int(args[0].Int)
+		if idx < 0 || idx >= len(str) {
+			return Value{}, NewJavaException("java/lang/StringIndexOutOfBoundsException")
+		}
+		return IntValue(int32(str[idx])), nil
+	case "substring":
+		if descriptor == "(I)Ljava/lang/String;" {
+			begin := int(args[0].Int)
+			if begin < 0 || begin > len(str) {
+				return Value{}, NewJavaException("java/lang/StringIndexOutOfBoundsException")
+			}
+			return RefValue(str[begin:]), nil
+		}
+		// (II)Ljava/lang/String;
+		begin := int(args[0].Int)
+		end := int(args[1].Int)
+		if begin < 0 || end > len(str) || begin > end {
+			return Value{}, NewJavaException("java/lang/StringIndexOutOfBoundsException")
+		}
+		return RefValue(str[begin:end]), nil
+	case "indexOf":
+		if descriptor == "(Ljava/lang/String;)I" {
+			target, _ := args[0].Ref.(string)
+			return IntValue(int32(strings.Index(str, target))), nil
+		}
+		if descriptor == "(I)I" {
+			ch := rune(args[0].Int)
+			return IntValue(int32(strings.IndexRune(str, ch))), nil
+		}
+		return IntValue(-1), nil
+	case "contains":
+		target, _ := args[0].Ref.(string)
+		if strings.Contains(str, target) {
+			return IntValue(1), nil
+		}
+		return IntValue(0), nil
+	case "equals":
+		if args[0].Type == TypeNull {
+			return IntValue(0), nil
+		}
+		other, ok := args[0].Ref.(string)
+		if ok && str == other {
+			return IntValue(1), nil
+		}
+		return IntValue(0), nil
+	case "toUpperCase":
+		return RefValue(strings.ToUpper(str)), nil
+	case "toLowerCase":
+		return RefValue(strings.ToLower(str)), nil
+	case "trim":
+		return RefValue(strings.TrimSpace(str)), nil
+	case "replace":
+		if descriptor == "(CC)Ljava/lang/String;" {
+			oldCh := rune(args[0].Int)
+			newCh := rune(args[1].Int)
+			return RefValue(strings.ReplaceAll(str, string(oldCh), string(newCh))), nil
+		}
+		// (Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;
+		if len(args) >= 2 {
+			oldStr, _ := args[0].Ref.(string)
+			newStr, _ := args[1].Ref.(string)
+			return RefValue(strings.ReplaceAll(str, oldStr, newStr)), nil
+		}
+		return RefValue(str), nil
+	case "isEmpty":
+		if len(str) == 0 {
+			return IntValue(1), nil
+		}
+		return IntValue(0), nil
+	case "hashCode":
+		h := int32(0)
+		for _, c := range str {
+			h = 31*h + int32(c)
+		}
+		return IntValue(h), nil
+	case "toString":
+		return RefValue(str), nil
+	case "startsWith":
+		prefix, _ := args[0].Ref.(string)
+		if strings.HasPrefix(str, prefix) {
+			return IntValue(1), nil
+		}
+		return IntValue(0), nil
+	case "endsWith":
+		suffix, _ := args[0].Ref.(string)
+		if strings.HasSuffix(str, suffix) {
+			return IntValue(1), nil
+		}
+		return IntValue(0), nil
+	case "toCharArray":
+		chars := make([]Value, len(str))
+		for i, c := range str {
+			chars[i] = IntValue(int32(c))
+		}
+		return RefValue(&JArray{Elements: chars}), nil
+	case "getBytes":
+		bytes := make([]Value, len(str))
+		for i := 0; i < len(str); i++ {
+			bytes[i] = IntValue(int32(str[i]))
+		}
+		return RefValue(&JArray{Elements: bytes}), nil
+	case "compareTo":
+		other, _ := args[0].Ref.(string)
+		return IntValue(int32(strings.Compare(str, other))), nil
+	case "intern":
+		return RefValue(str), nil
+	}
+	return Value{}, fmt.Errorf("String method not implemented: %s:%s", methodName, descriptor)
+}
+
+// handleStringValueOf handles String.valueOf static method calls natively.
+func (vm *VM) handleStringValueOf(descriptor string, args []Value) (Value, error) {
+	switch descriptor {
+	case "(I)Ljava/lang/String;":
+		return RefValue(fmt.Sprintf("%d", args[0].Int)), nil
+	case "(J)Ljava/lang/String;":
+		return RefValue(fmt.Sprintf("%d", args[0].Long)), nil
+	case "(D)Ljava/lang/String;":
+		return RefValue(fmt.Sprintf("%v", args[0].Double)), nil
+	case "(F)Ljava/lang/String;":
+		return RefValue(fmt.Sprintf("%v", args[0].Float)), nil
+	case "(Z)Ljava/lang/String;":
+		if args[0].Int != 0 {
+			return RefValue("true"), nil
+		}
+		return RefValue("false"), nil
+	case "(C)Ljava/lang/String;":
+		return RefValue(string(rune(args[0].Int))), nil
+	case "(Ljava/lang/Object;)Ljava/lang/String;":
+		if args[0].Type == TypeNull {
+			return RefValue("null"), nil
+		}
+		if s, ok := args[0].Ref.(string); ok {
+			return RefValue(s), nil
+		}
+		return RefValue(vm.valueToString(args[0])), nil
+	}
+	return Value{}, fmt.Errorf("String.valueOf not implemented for %s", descriptor)
 }

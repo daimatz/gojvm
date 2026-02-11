@@ -79,3 +79,43 @@ func TestFib(t *testing.T) {
 		t.Errorf("Fib output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestSwitch(t *testing.T) {
+	got := runClass(t, "../../testdata/Switch.class")
+	want := "5\n4\n1\n"
+	if got != want {
+		t.Errorf("Switch output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestSort(t *testing.T) {
+	got := runClass(t, "../../testdata/Sort.class")
+	want := "1\n2\n3\n4\n5\n"
+	if got != want {
+		t.Errorf("Sort output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestInheritance(t *testing.T) {
+	got := runClass(t, "../../testdata/Inheritance.class")
+	want := "1\n2\n"
+	if got != want {
+		t.Errorf("Inheritance output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestTryCatch(t *testing.T) {
+	got := runClass(t, "../../testdata/TryCatch.class")
+	want := "5\n-1\n0\n"
+	if got != want {
+		t.Errorf("TryCatch output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestInterface(t *testing.T) {
+	got := runClass(t, "../../testdata/Interface.class")
+	want := "7\n12\n"
+	if got != want {
+		t.Errorf("Interface output:\ngot  %q\nwant %q", got, want)
+	}
+}

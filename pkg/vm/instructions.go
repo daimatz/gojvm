@@ -277,14 +277,14 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
-			return Value{}, false, fmt.Errorf("NullPointerException")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		arr, ok := arrRef.Ref.(*JArray)
 		if !ok {
 			return Value{}, false, fmt.Errorf("xaload: reference is not an array")
 		}
 		if index < 0 || int(index) >= len(arr.Elements) {
-			return Value{}, false, fmt.Errorf("ArrayIndexOutOfBoundsException: %d", index)
+			return Value{}, false, NewJavaException("java/lang/ArrayIndexOutOfBoundsException")
 		}
 		frame.Push(arr.Elements[index])
 
@@ -292,14 +292,14 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
-			return Value{}, false, fmt.Errorf("NullPointerException")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		arr, ok := arrRef.Ref.(*JArray)
 		if !ok {
 			return Value{}, false, fmt.Errorf("aaload: reference is not an array")
 		}
 		if index < 0 || int(index) >= len(arr.Elements) {
-			return Value{}, false, fmt.Errorf("ArrayIndexOutOfBoundsException: %d", index)
+			return Value{}, false, NewJavaException("java/lang/ArrayIndexOutOfBoundsException")
 		}
 		frame.Push(arr.Elements[index])
 
@@ -358,14 +358,14 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
-			return Value{}, false, fmt.Errorf("NullPointerException")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		arr, ok := arrRef.Ref.(*JArray)
 		if !ok {
 			return Value{}, false, fmt.Errorf("xastore: reference is not an array")
 		}
 		if index < 0 || int(index) >= len(arr.Elements) {
-			return Value{}, false, fmt.Errorf("ArrayIndexOutOfBoundsException: %d", index)
+			return Value{}, false, NewJavaException("java/lang/ArrayIndexOutOfBoundsException")
 		}
 		arr.Elements[index] = value
 
@@ -374,14 +374,14 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
-			return Value{}, false, fmt.Errorf("NullPointerException")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		arr, ok := arrRef.Ref.(*JArray)
 		if !ok {
 			return Value{}, false, fmt.Errorf("aastore: reference is not an array")
 		}
 		if index < 0 || int(index) >= len(arr.Elements) {
-			return Value{}, false, fmt.Errorf("ArrayIndexOutOfBoundsException: %d", index)
+			return Value{}, false, NewJavaException("java/lang/ArrayIndexOutOfBoundsException")
 		}
 		arr.Elements[index] = value
 
@@ -451,7 +451,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		v2 := frame.Pop()
 		v1 := frame.Pop()
 		if v2.Int == 0 {
-			return Value{}, false, fmt.Errorf("ArithmeticException: / by zero")
+			return Value{}, false, NewJavaException("java/lang/ArithmeticException")
 		}
 		frame.Push(IntValue(v1.Int / v2.Int))
 
@@ -459,7 +459,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		v2 := frame.Pop()
 		v1 := frame.Pop()
 		if v2.Int == 0 {
-			return Value{}, false, fmt.Errorf("ArithmeticException: / by zero")
+			return Value{}, false, NewJavaException("java/lang/ArithmeticException")
 		}
 		frame.Push(IntValue(v1.Int % v2.Int))
 
@@ -748,7 +748,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		atype := frame.ReadU8()
 		count := frame.Pop().Int
 		if count < 0 {
-			return Value{}, false, fmt.Errorf("NegativeArraySizeException: %d", count)
+			return Value{}, false, NewJavaException("java/lang/NegativeArraySizeException")
 		}
 		elements := make([]Value, count)
 		_ = atype // type doesn't matter for initialization, all zero
@@ -762,7 +762,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		_ = frame.ReadU16() // CP index for element type
 		count := frame.Pop().Int
 		if count < 0 {
-			return Value{}, false, fmt.Errorf("NegativeArraySizeException: %d", count)
+			return Value{}, false, NewJavaException("java/lang/NegativeArraySizeException")
 		}
 		elements := make([]Value, count)
 		for i := range elements {
@@ -774,7 +774,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 	case OpArraylength:
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
-			return Value{}, false, fmt.Errorf("NullPointerException: arraylength")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		arr, ok := arrRef.Ref.(*JArray)
 		if !ok {
@@ -783,18 +783,30 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.Push(IntValue(int32(len(arr.Elements))))
 
 	case OpAthrow:
-		// Simplified: just return an error
 		excRef := frame.Pop()
 		if excRef.Type == TypeNull {
-			return Value{}, false, fmt.Errorf("NullPointerException: athrow null")
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
 		}
 		if obj, ok := excRef.Ref.(*JObject); ok {
-			return Value{}, false, fmt.Errorf("Exception: %s", obj.ClassName)
+			return Value{}, false, &JavaException{Object: obj}
 		}
-		return Value{}, false, fmt.Errorf("Exception thrown")
+		return Value{}, false, fmt.Errorf("athrow: non-object on stack")
 
 	case OpCheckcast:
-		_ = frame.ReadU16() // no-op: skip type check
+		index := frame.ReadU16()
+		pool := frame.Class.ConstantPool
+		className, err := classfile.GetClassName(pool, index)
+		if err != nil {
+			return Value{}, false, fmt.Errorf("checkcast: %w", err)
+		}
+		val := frame.Peek()
+		if val.Type != TypeNull {
+			if obj, ok := val.Ref.(*JObject); ok {
+				if !vm.isInstanceOf(obj.ClassName, className) {
+					return Value{}, false, NewJavaException("java/lang/ClassCastException")
+				}
+			}
+		}
 
 	case OpInstanceof:
 		index := frame.ReadU16()
@@ -806,7 +818,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		ref := frame.Pop()
 		if ref.Type == TypeNull {
 			frame.Push(IntValue(0))
-		} else if obj, ok := ref.Ref.(*JObject); ok && obj.ClassName == className {
+		} else if obj, ok := ref.Ref.(*JObject); ok && vm.isInstanceOf(obj.ClassName, className) {
 			frame.Push(IntValue(1))
 		} else {
 			frame.Push(IntValue(0))

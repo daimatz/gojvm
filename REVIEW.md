@@ -1,13 +1,10 @@
-# Code Review: JmodClassLoader & JDK Class Loading (Milestone 3)
+# Code Review: 例外処理・instanceof階層・インターフェース解決 (Milestone 4)
 
 ## Summary
 
-JmodClassLoaderによるjmodファイルからの直接クラス読み込み、多数のネイティブメソッドスタブ、30+のオペコード追加により、Fib.java（メモ化フィボナッチ with HashMap/Integer）が正しく動作するようになった。前回レビュー（Milestone 2）で指摘したCritical Issues 3件、Major Issues 4件は全て修正済み。全体的なコード品質は良好。
+instanceof の継承階層チェック、try-catch 例外処理、invokeinterface によるインターフェースメソッド解決を実装。Switch, Sort, Inheritance, TryCatch, Interface を含む全11テストがパス。
 
-現在の主な懸念点:
-1. JmodClassLoaderがキャッシュミスのたびにjmodファイル全体（~120MB）をメモリに読み込む深刻なパフォーマンス問題
-2. `System.arraycopy` の境界チェック不足によるGoランタイムpanic
-3. `Float.floatToRawIntBits` ネイティブメソッドの実装が不正（常に0を返す）
+前回レビュー（Milestone 3）の Critical 3件は全て修正済み。新たに Critical 2件、Major 3件を検出。特に **ensureInitialized が JavaException を fmt.Errorf でラップして型情報を失う問題** と **NullPointerException の生成方法が不統一で一部が try-catch で捕捉不能な問題** は修正すべき。
 
 ---
 
@@ -15,89 +12,115 @@ JmodClassLoaderによるjmodファイルからの直接クラス読み込み、�
 
 | ID | 問題 | 状態 |
 |----|------|------|
-| C1 | aaload/aastore 安全でない型アサーション | **修正済** - comma-ok + null/境界チェック追加 (instructions.go:276-304) |
-| C2 | anewarray 負のサイズでpanic | **修正済** - NegativeArraySizeException チェック追加 (instructions.go:749-751) |
-| C3 | executeNativeMethod 安全でない型アサーション | **修正済** - comma-ok パターン使用 (vm.go:119-123) |
-| M1 | UserClassLoader キャッシュ確認順序 | **修正済** - キャッシュ確認が最初 (classloader.go:127-129) |
-| M2 | スーパークラスのメソッド解決が未実装 | **修正済** - resolveMethod で階層を辿る (vm.go:353-367) |
-| M3 | anewarray 要素が null でなく int(0) 初期化 | **修正済** - NullValue() で初期化 (instructions.go:767-770) |
-| M4 | 新規オペコードのユニットテスト不足 | **修正済** - iinc, anewarray, aaload/aastore, if_acmpne, instanceof テスト追加 |
-
-全ての Critical/Major 指摘が適切に修正されている。
+| C1 | JmodClassLoader がキャッシュミスのたびにjmod全体を読み込む | **修正済** — `ensureZipReader()` で zip.Reader/zipData を1回だけ作成・保持 (classloader.go:35-62) |
+| C2 | nativeArraycopy に境界チェックがない | **修正済** — 負値・範囲外チェック追加 (vm.go:929-933) |
+| C3 | Float.floatToRawIntBits が常に0を返す | **修正済** — `math.Float32bits(args[0].Float)` を使用 (vm.go:179) |
+| M1 | ldc2_w が double を float32 に切り捨てる | **未修正** — TypeDouble がないため設計上の制約 (instructions.go:221) |
+| M2 | ensureInitialized が LoadClass エラーを無視する | **修正済** — エラー時に `initializedClasses[className] = false` に戻す (vm.go:300) |
+| M3 | デフォルトjmodパスがarm64固定 | **未修正** — 機能的な問題ではない |
+| M4 | invokeinterface の文字列 equals が場当たり的 | **未修正** — 既存のまま (vm.go:815-826) |
+| m1 | instanceof がクラス継承を考慮しない | **修正済** — `isInstanceOf` で継承階層とインターフェースを再帰的にチェック (vm.go:370-397) |
+| m2 | checkcast が型チェックを行わない | **修正済** — `isInstanceOf` を使用して ClassCastException を投げる (instructions.go:803-809) |
+| m3 | getfield のデフォルト値が一律 NullValue() | **修正済** — `defaultValueForDescriptor` を使用 (vm.go:560-565) |
 
 ---
 
 ## Critical Issues
 
-### C1: JmodClassLoader がキャッシュミスのたびにjmod全体を読み込む
+### C1: ensureInitialized が JavaException を fmt.Errorf でラップし型情報を失う
 
-- **ファイル**: `pkg/vm/classloader.go:33-81`
-- **問題**: `LoadClass` でキャッシュミスするたびに、jmodファイル全体をメモリに読み込み、zipをパースし、エントリを線形検索している。java.base.jmod は通常 ~120MB。Fib.java の実行では Object, Integer, HashMap, System, Number 等の多数のJDKクラスをロードするため、合計で ~1GB 以上のメモリ割り当てが発生する。
+- **ファイル**: `pkg/vm/vm.go:317`
+- **問題**: `<clinit>` 実行中に Java 例外が投げられた場合、`fmt.Errorf("error in <clinit> of %s: %w", className, err)` でラップされる。呼び出し元の `executeMethod` (vm.go:104) は `err.(*JavaException)` で直接型アサーションを行うが、`fmt.Errorf` でラップされた `*JavaException` は直接型アサーションでは検出できない（`errors.As()` が必要）。
   ```go
-  // classloader.go:50-57 — キャッシュミスのたびに ~120MB を確保
-  data := make([]byte, stat.Size())
-  if _, err := io.ReadFull(f, data); err != nil { ... }
-  zipData := data[4:]
-  reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
-  ```
-- **影響**: 起動が極めて遅く、メモリ使用量が巨大。Fib.java で ~10 クラスをロードする場合、~1.2GB のアロケーション。
-- **修正方法**: zip.Reader をキャッシュし、ファイルデータの読み込みを1回に限定する。
-  ```go
-  type JmodClassLoader struct {
-      JmodPath  string
-      Cache     map[string]*classfile.ClassFile
-      zipReader *zip.Reader    // 追加: 一度だけ作成
-      zipData   []byte         // 追加: ファイルデータ保持
+  // vm.go:315-318 — JavaException が fmt.Errorf でラップされる
+  _, err := vm.executeMethod(cf, clinit, nil)
+  if err != nil {
+      return fmt.Errorf("error in <clinit> of %s: %w", className, err)
+      // ↑ *JavaException が *fmt.wrapError になり、型情報が失われる
   }
 
-  func (cl *JmodClassLoader) ensureOpen() error {
-      if cl.zipReader != nil { return nil }
-      // ファイル読み込みとzip.Reader作成を1回だけ実行
-      ...
+  // vm.go:103-106 — 呼び出し元で直接型アサーション
+  javaExc, isJavaExc := err.(*JavaException)
+  if !isJavaExc {
+      // ↑ ラップされた JavaException はここで false になる！
+      return Value{}, fmt.Errorf("in %s.%s:%s at PC=%d: %w", ...)
+      // JavaException がさらに別のエラーとしてラップされ、二度と捕捉できない
   }
   ```
-
-### C2: nativeArraycopy に境界チェックがない
-
-- **ファイル**: `pkg/vm/vm.go:841-843`
-- **問題**: `System.arraycopy` のコピーループに境界チェックがない。`srcPos + length > len(srcArr.Elements)` や `destPos + length > len(destArr.Elements)` の場合、Goランタイムの `index out of range` panicが発生する。
+- **影響**: `<clinit>` 内で投げられた Java 例外が try-catch で捕捉できなくなる。例えば、static initializer 内での `throw new RuntimeException()` が Java 例外として伝播せず、Go エラーとして扱われて VM がクラッシュする。
+- **修正方法**: `ensureInitialized` で `*JavaException` をそのまま伝播するか、`executeMethod` で `errors.As()` を使用する。
   ```go
-  // vm.go:841-843 — 境界チェックなし
-  for i := 0; i < length; i++ {
-      destArr.Elements[destPos+i] = srcArr.Elements[srcPos+i]
-  }
-  ```
-- **影響**: 不正なarraycopy呼び出しでVM全体がクラッシュする。HashMap のリサイズ等で発生しうる。
-- **修正方法**:
-  ```go
-  if srcPos < 0 || destPos < 0 || length < 0 ||
-      srcPos+length > len(srcArr.Elements) ||
-      destPos+length > len(destArr.Elements) {
-      return Value{}, fmt.Errorf("ArrayIndexOutOfBoundsException: arraycopy")
+  // 案1: ensureInitialized で JavaException をそのまま返す
+  _, err := vm.executeMethod(cf, clinit, nil)
+  if err != nil {
+      if _, ok := err.(*JavaException); ok {
+          return err  // JavaException はそのまま伝播
+      }
+      return fmt.Errorf("error in <clinit> of %s: %w", className, err)
   }
   ```
 
-### C3: Float.floatToRawIntBits が常に0を返す
+### C2: NullPointerException の生成方法が不統一（一部が try-catch で捕捉不能）
 
-- **ファイル**: `pkg/vm/vm.go:164`
-- **問題**: `return IntValue(args[0].Int), nil` — float値は `Value.Float` フィールドに格納されるが、`Value.Int` フィールド（ゼロ値の0）を返している。任意の非ゼロfloat値に対して0を返す。
+- **ファイル**: `pkg/vm/vm.go:553-554`, `vm.go:581-582`, `vm.go:622-623`, `vm.go:809`
+- **問題**: 配列操作（instructions.go:280-281, 295-296 等）では `NewJavaException("java/lang/NullPointerException")` を使って `*JavaException` を返しているが、getfield, putfield, invokevirtual では `fmt.Errorf("getfield: NullPointerException")` で単純な文字列エラーを返している。
   ```go
-  // vm.go:164 — args[0].Float を使うべき
-  case "java/lang/Float.floatToRawIntBits:(F)I":
-      return IntValue(args[0].Int), nil // BUG: Int は常に 0
+  // instructions.go:280-281 — 正しい（*JavaException を返す）
+  return Value{}, false, NewJavaException("java/lang/NullPointerException")
+
+  // vm.go:553-554 — 問題（fmt.Errorf で返す）
+  return Value{}, false, fmt.Errorf("getfield: NullPointerException")
+  // ↑ これは *JavaException ではないため try-catch で捕捉できない
+
+  // 同様に:
+  // vm.go:581-582 (putfield)
+  // vm.go:622-623 (invokevirtual)
+  // vm.go:809     (invokeinterface)
   ```
-- **影響**: Float クラスの静的初期化で floatToRawIntBits が呼ばれた場合、NaN 判定等が正しく動作しない。現在の Fib.java テストでは Float クラスが直接使われないため顕在化していない。
-- **修正方法**:
+- **影響**: `try { obj.field; } catch (NullPointerException e) { ... }` が期待通りに動作しない。getfield/putfield/invokevirtual 由来の NullPointerException は catch ブロックに到達せず、VM 全体がエラーで停止する。
+- **修正方法**: 全ての NullPointerException 生成箇所で `NewJavaException` を使用する。
   ```go
-  case "java/lang/Float.floatToRawIntBits:(F)I":
-      return IntValue(int32(math.Float32bits(args[0].Float))), nil
+  // vm.go:553-554
+  return Value{}, false, NewJavaException("java/lang/NullPointerException")
   ```
 
 ---
 
 ## Major Issues
 
-### M1: ldc2_w が double を float32 に切り捨てる
+### M1: isInstanceOf にサイクル検出がない（malformed classfile で無限再帰）
+
+- **ファイル**: `pkg/vm/vm.go:370-397`
+- **問題**: `isInstanceOf` はインターフェースを再帰的にチェックするが、visited セットを持たない。正規の Java プログラムではインターフェースの循環参照は不可能だが、malformed な classfile では可能。
+  ```go
+  // vm.go:384-388 — 再帰呼び出しにサイクル検出なし
+  for _, ifIdx := range cf.Interfaces {
+      ifName, err := classfile.GetClassName(cf.ConstantPool, ifIdx)
+      if err == nil && (ifName == targetClassName || vm.isInstanceOf(ifName, targetClassName)) {
+          //                                         ↑ 循環参照で無限再帰
+          return true
+      }
+  }
+  ```
+- **影響**: 正常な Java プログラムでは発生しない。ただし、意図的に細工された classfile や JDK 内部クラスの循環的な依存関係（実際には存在しないが）でスタックオーバーフローが発生する可能性がある。`maxFrameDepth` は `executeMethod` にのみ適用され、`isInstanceOf` の再帰には適用されない。
+- **修正方法**: visited セットを導入する。
+  ```go
+  func (vm *VM) isInstanceOf(objectClassName, targetClassName string) bool {
+      return vm.isInstanceOfWithVisited(objectClassName, targetClassName, make(map[string]bool))
+  }
+  ```
+
+### M2: resolveMethod のインターフェース探索にも同様のサイクルリスク
+
+- **ファイル**: `pkg/vm/vm.go:435-453`
+- **問題**: `resolveMethod` がインターフェースのメソッドを探索する際に自身を再帰呼び出しするが、visited セットがない。インターフェース A が B を extends し、B が A を extends するような malformed classfile で無限再帰になる。
+  ```go
+  // vm.go:447-449 — 再帰呼び出しにサイクル検出なし
+  ifCf, ifMethod, err := vm.resolveMethod(ifName, methodName, descriptor)
+  ```
+- **影響**: M1 と同様、正常な Java プログラムでは発生しない。
+
+### M3: ldc2_w が double を float32 に切り捨てる（前回から継続）
 
 - **ファイル**: `pkg/vm/instructions.go:221`
 - **問題**: `FloatValue(float32(c.Value))` で double (float64) を float32 に変換しており、精度が失われる。VM に TypeDouble が存在しないため、設計上の制約。
@@ -105,90 +128,43 @@ JmodClassLoaderによるjmodファイルからの直接クラス読み込み、�
   case *classfile.ConstantDouble:
       frame.Push(FloatValue(float32(c.Value))) // 精度損失
   ```
-- **影響**: double リテラルを使うプログラムで計算結果が不正確になる。現在の Fib.java では double は使用されていないため影響なし。
-- **修正案**: TypeDouble を Value に追加し、double 専用のフィールド (Float64 float64) を持たせる。または Long フィールドに bits を格納して代用する。
-
-### M2: ensureInitialized が LoadClass エラーを無視する
-
-- **ファイル**: `pkg/vm/vm.go:283-285`
-- **問題**: `LoadClass` がエラーを返した場合、`return nil` でエラーを握りつぶしているが、その前に `vm.initializedClasses[className] = true` を設定しているため、クラスが後で正常にロード可能になっても初期化が実行されない。
-  ```go
-  vm.initializedClasses[className] = true // L281: 先に設定
-
-  cf, err := vm.ClassLoader.LoadClass(className)
-  if err != nil {
-      return nil // L285: エラーを無視、しかし初期化済みフラグは残る
-  }
-  ```
-- **影響**: 現在のクラスローダーでは問題にならないが、クラスパスが動的に変わるシナリオで初期化漏れが起きうる。また、本来のエラー（jmod破損等）が隠蔽される。
-- **修正案**: エラー時に `vm.initializedClasses[className] = false` に戻す。
-
-### M3: デフォルトjmodパスがarm64固定
-
-- **ファイル**: `cmd/gojvm/main.go:12`
-- **問題**: `defaultJmodPath` が `java-17-openjdk-arm64` にハードコードされている。amd64 環境では動作しない。
-  ```go
-  const defaultJmodPath = "/usr/lib/jvm/java-17-openjdk-arm64/jmods/java.base.jmod"
-  ```
-- **修正方法**: `JAVA_HOME` 環境変数から自動検出するか、`/usr/lib/jvm/java-*-openjdk-*/jmods/java.base.jmod` をglobで検索する。環境変数 `JAVA_BASE_JMOD` のフォールバックは既に実装されている (main.go:25-27)。
-
-### M4: invokeinterface の文字列 equals が場当たり的
-
-- **ファイル**: `pkg/vm/vm.go:727-737`
-- **問題**: `invokeinterface` で receiver が string の場合に `equals` メソッドだけ特別処理している。`hashCode`, `toString`, `compareTo` 等は処理できない。
-  ```go
-  if _, isStr := objectRef.Ref.(string); isStr && methodRef.MethodName == "equals" {
-      // 特別処理
-  }
-  ```
-- **影響**: 文字列を Map のキーとして使用した場合 (HashMap が hashCode を呼ぶ)、文字列の hashCode が処理できずエラーになる。
-- **修正案**: 文字列を JObject でラップし、java/lang/String クラスのメソッドとして統一的に処理する。
+- **影響**: double リテラルを使うプログラムで計算結果が不正確になる。
 
 ---
 
 ## Minor Issues
 
-### m1: instanceof がクラス継承を考慮しない
+### m1: invokeinterface の文字列 equals が場当たり的（前回から継続）
 
-- **ファイル**: `pkg/vm/instructions.go:809`
-- **問題**: `obj.ClassName == className` の完全一致のみ。`Integer instanceof Object` が false を返す。
-- **現状**: 現在のテストでは同一クラスのチェックのみ使用。将来的に `resolveMethod` のように階層を辿る実装が必要。
+- **ファイル**: `pkg/vm/vm.go:815-826`
+- **問題**: `invokeinterface` で receiver が string の場合に `equals` メソッドだけ特別処理している。`hashCode`, `toString`, `compareTo` 等は処理できない。
+- **影響**: 文字列を Map のキーとして使用した場合に問題になる可能性。
 
-### m2: checkcast が型チェックを行わない
-
-- **ファイル**: `pkg/vm/instructions.go:797`
-- **問題**: CPインデックスを読み捨てるだけの no-op。ClassCastException を投げない。
-- **現状**: instanceof の後でのみ使用されるため安全。
-
-### m3: getfield と getstatic でデフォルト値の扱いが不一致
-
-- **ファイル**: `pkg/vm/vm.go:472-477` vs `vm.go:425-429`
-- **問題**: `getstatic` は `defaultValueForDescriptor` を使って型に応じたデフォルト値を返すが、`getfield` は一律 `NullValue()` を返す。int フィールドの未設定時に TypeNull の Value が返る。
-  ```go
-  // getfield (vm.go:472-477) — 一律 NullValue()
-  if !exists {
-      frame.Push(NullValue())
-  }
-
-  // getstatic (vm.go:425-429) — 型に応じたデフォルト値
-  val = defaultValueForDescriptor(fieldRef.Descriptor)
-  ```
-- **影響**: `.Int` フィールドは 0 なので算術演算は正しく動くが、`ifnull` でチェックすると int フィールドが null と誤判定される。
-
-### m4: テスト用 jmod パスがハードコード
+### m2: テスト用 jmod パスがarm64固定（前回から継続）
 
 - **ファイル**: `pkg/vm/integration_test.go:10`
-- **問題**: `testJmodPath` が arm64 パス固定。CI/CD 環境で失敗する可能性。
+- **問題**: `testJmodPath` が `java-17-openjdk-arm64` にハードコードされている。
   ```go
   const testJmodPath = "/usr/lib/jvm/java-17-openjdk-arm64/jmods/java.base.jmod"
   ```
-- **修正案**: `os.Getenv("JAVA_BASE_JMOD")` にフォールバックする。
 
-### m5: CAS 系ネイティブメソッドが常に成功を返す
+### m3: NegativeArraySizeException が JavaException でなく fmt.Errorf
 
-- **ファイル**: `pkg/vm/vm.go:237-243`
-- **問題**: `Unsafe.compareAndSetInt/Long/Reference` が常に `true` を返す。マルチスレッド環境では問題になるが、シングルスレッドの現在の実装では正しい動作。
-- **現状**: 許容可能。将来スレッドを実装する際に再実装が必要。
+- **ファイル**: `pkg/vm/instructions.go:751`, `instructions.go:765`
+- **問題**: C2 と同様のパターン。`NegativeArraySizeException` が `fmt.Errorf` で生成されているため、try-catch で捕捉できない。
+  ```go
+  return Value{}, false, fmt.Errorf("NegativeArraySizeException: %d", count)
+  ```
+
+### m4: arraycopy の各種例外も fmt.Errorf
+
+- **ファイル**: `pkg/vm/vm.go:920-933`
+- **問題**: `NullPointerException`, `ArrayStoreException`, `ArrayIndexOutOfBoundsException` が全て `fmt.Errorf` で生成されている。
+
+### m5: arraylength の NullPointerException も fmt.Errorf
+
+- **ファイル**: `pkg/vm/instructions.go:777`
+- **問題**: C2 と同じパターン。
 
 ---
 
@@ -198,58 +174,54 @@ JmodClassLoaderによるjmodファイルからの直接クラス読み込み、�
 
 | ファイル | テスト | 評価 |
 |---------|--------|------|
-| `pkg/vm/classloader.go` | Bootstrap/User/Cache/NotFound テスト | **良好** |
-| `pkg/vm/object.go` | JArray/JObject ユニットテスト | **良好** |
-| `pkg/vm/instructions.go` | 20+ ユニットテスト (iconst, bipush, arithmetic, branch, stack, sipush, overflow, ifnull, areturn, iinc, anewarray, aaload/aastore, if_acmpne, instanceof) | **良好** |
+| `pkg/vm/instructions.go` | 20+ ユニットテスト (iconst, bipush, arithmetic, branch, stack, sipush, overflow, ifnull, areturn, iinc, anewarray, aaload/aastore, if_acmpne, instanceof, division by zero) | **良好** |
 | `pkg/vm/vm.go` | getfield/putfield, invokespecial, checkcast テスト + 統合テスト | **良好** |
-| `pkg/vm/integration_test.go` | 6テスト (Hello, Add, Arithmetic, ControlFlow, PrintString, Fib) | **良好** |
+| `pkg/vm/integration_test.go` | 11テスト (Hello, Add, Arithmetic, ControlFlow, PrintString, Fib, Switch, Sort, Inheritance, TryCatch, Interface) | **良好** |
 | `pkg/vm/frame.go` | 間接的にのみテスト | **可** |
-| `pkg/native/system.go` | 統合テスト経由のみ | **可** |
+| `pkg/vm/exception.go` | DivisionByZero テストで JavaException の型チェック (instructions_test.go:311-314) | **可** |
 
-### 前回からの改善
+### 新規テストの評価
 
-前回レビューで指摘した「新規6オペコードのユニットテスト不足」は全て対応済み:
-- `TestIinc`: 正の値、負の値、ゼロ、大きい値 (6ケース)
-- `TestAnewarray`: サイズ5、サイズ0 (2ケース)
-- `TestAaloadAastore`: store/load、異なるインデックス (2ケース)
-- `TestIfAcmpne`: 同一参照、異なる参照、両方null (3ケース)
-- `TestInstanceof`: 一致クラス、不一致、null (3ケース)
+- **TestSwitch**: tableswitch/lookupswitch の統合テスト。前回レビューで「追加推奨」とした項目がカバーされている。
+- **TestSort**: 配列操作（newarray, iaload, iastore）+ ソートアルゴリズムの統合テスト。
+- **TestInheritance**: instanceof の継承階層チェックを検証。前回 m1 で指摘した点が統合テストでカバーされている。
+- **TestTryCatch**: 例外の throw/catch、catch ブロック内の処理、finally の動作を検証。期待値 "5\n-1\n0\n" は try/catch/finally パターンが正しく動作していることを示す。
+- **TestInterface**: invokeinterface によるインターフェースメソッド呼び出しとデフォルトメソッドの解決を検証。
 
 ### 追加推奨テスト
 
 **高優先度:**
-1. `nativeArraycopy` のエラーケース（境界外、負のオフセット、null配列）
-2. `resolveMethod` のスーパークラス探索テスト
+1. `<clinit>` 内で Java 例外が投げられた場合のテスト（C1 の検証）
+2. getfield/putfield に対する null オブジェクトの try-catch テスト（C2 の検証）
 
 **低優先度:**
-3. `tableswitch` / `lookupswitch` のユニットテスト
-4. `ldc` / `ldc_w` のユニットテスト（Integer, Float, String, Class 定数）
+3. 多階層継承（A extends B extends C implements D, D extends E）での instanceof テスト
+4. athrow で null をスローした場合の NullPointerException テスト
 
 ---
 
 ## Good Points
 
-- **前回レビュー指摘の全修正**: Critical 3件 + Major 4件が全て適切に対応されている。特に型アサーションの安全性（comma-ok パターン）、配列境界チェック、NullValue() 初期化は正確に修正されている。
-- **resolveMethod の導入**: スーパークラスのメソッド解決が `SuperClassName()` を辿るループとして実装され、`invokevirtual`、`invokespecial`、`invokestatic` で統一的に使用されている (vm.go:353-367)。
-- **クラス初期化 (`<clinit>`) の実装**: `ensureInitialized` がスーパークラスを先に初期化し、`<clinit>` を実行する正しい順序で実装されている (vm.go:277-305)。再帰防止フラグも適切。
-- **静的フィールドの実装**: `staticFields` マップと `getstatic`/`putstatic` により、クラス変数が正しく機能する。型に応じたデフォルト値 (`defaultValueForDescriptor`) も適切。
-- **JmodClassLoader の設計**: jmod ファイルの 4バイトヘッダースキップ、zip として解凍、`classes/` プレフィックス付きパスの正しい構築。キャッシュも実装済み（パフォーマンスは要改善だが機能は正しい）。
-- **テストの大幅充実**: classloader_test.go（4テスト）、object_test.go、instructions_test.go の新規テストにより、ユニットテストカバレッジが大幅に向上。
-- **ネイティブメソッドディスパッチ**: `className.methodName:descriptor` キーによる switch 文は明快で拡張しやすい。`registerNatives`/`initIDs` パターンマッチも適切。
-- **例外ハンドラのパース**: `parseCodeAttribute` が exception_table を正しくパースしている (parser.go:243-261)。athrow も基本的な実装がある。
-- **countParams の堅牢性**: 配列型 (`[L...;`, `[I` 等)、プリミティブ型、オブジェクト型を全て正しくパースする (vm.go:779-821)。
+- **例外処理の基本設計が正しい**: `JavaException` 型を導入し、`executeMethod` 内の実行ループで例外テーブルを検索、ハンドラへのジャンプ、スタックリセット、例外オブジェクトのプッシュが JVM 仕様通りに実装されている (vm.go:103-117)。
+- **findExceptionHandler の正確な範囲チェック**: `pc < int(h.StartPC) || pc >= int(h.EndPC)` で半開区間 [startPC, endPC) を正しく処理。CatchType=0 の catch-all（finally）もサポート (vm.go:400-418)。
+- **isInstanceOf の階層探索**: スーパークラスチェーン + 各クラスのインターフェースを再帰的にチェックする正しい実装。直接の equal チェック → インターフェースチェック → スーパークラスへ移動の順序が適切 (vm.go:370-397)。
+- **resolveMethod のインターフェースデフォルトメソッド解決**: 通常のスーパークラスチェーンでメソッドが見つからない場合、インターフェースのデフォルトメソッドを探索する2パス設計が正しい (vm.go:421-455)。
+- **athrow の正しい実装**: null の throw で NullPointerException を生成、JObject の throw で JavaException を伝播、それ以外でエラーを返す3パターンの処理 (instructions.go:785-793)。
+- **checkcast の改善**: 前回レビューの m2 指摘を受けて `isInstanceOf` を使った型チェックと ClassCastException の生成を追加 (instructions.go:795-809)。
+- **前回 Critical 3件の完全修正**: JmodClassLoader のキャッシュ化、arraycopy の境界チェック、floatToRawIntBits の修正が全て適切に行われている。
+- **統合テストの充実**: 5テスト追加（Switch, Sort, Inheritance, TryCatch, Interface）により、新機能の動作が実際の Java プログラムレベルで検証されている。
 
 ---
 
 ## アーキテクチャ上の所見
 
 ### 設計上の強み
-1. **ClassLoader インターフェース**: テストでモック可能。JmodClassLoader/BootstrapClassLoader/UserClassLoader の3層が Parent Delegation Model を正しく表現。
-2. **Value struct**: タグ付きユニオンとして Int/Float/Long/Ref を保持する設計はシンプルで効率的。JVM の 2-slot ルール（long/double）を1スロットに簡略化しているが、現在のスコープでは問題ない。
-3. **Frame ベースの実行モデル**: 各メソッド呼び出しが独立した Frame を持ち、PC/SP/ローカル変数/オペランドスタックを管理する設計が clean。
+1. **JavaException 型の分離**: `exception.go` に独立ファイルとして配置し、`Error()` インターフェースを実装。Go のエラーハンドリングと JVM の例外処理を自然に統合している。
+2. **例外テーブルとの統合**: `classfile.ExceptionHandler` 構造体を `findExceptionHandler` で活用し、バイトコードレベルの例外処理を正しく実装。
+3. **invokeinterface の分離**: 4バイトオペランド (index, count, reserved) の読み取りと `ResolveInterfaceMethodref` の使用が JVM 仕様準拠。
 
 ### 今後の課題（現スコープ外）
 1. **TypeDouble の追加**: double 型を正しくサポートするために Value に Double フィールドを追加
-2. **例外処理の完全実装**: athrow + exception_table による catch ブロックへのジャンプ
-3. **文字列オブジェクトの統一**: 現在 string は Go の string として Ref に格納されているが、JObject でラップして java/lang/String のメソッドを統一的に処理すべき
-4. **スレッドサポート**: synchronized, volatile, CAS の正しい実装
+2. **文字列オブジェクトの統一**: Go の string を JObject でラップして java/lang/String のメソッドを統一的に処理
+3. **全例外を JavaException に統一**: 現在 fmt.Errorf で生成されている各種例外を JavaException に移行
+4. **multianewarray**: 多次元配列の生成

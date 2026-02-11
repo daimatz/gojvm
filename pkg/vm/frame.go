@@ -135,6 +135,14 @@ func (f *Frame) ReadI16() int16 {
 	return val
 }
 
+// Peek returns the top value of the operand stack without popping it.
+func (f *Frame) Peek() Value {
+	if f.SP <= 0 {
+		panic("operand stack underflow: SP=0")
+	}
+	return f.OperandStack[f.SP-1]
+}
+
 // ReadI32 reads an int32 operand (big-endian) and advances PC by 4.
 func (f *Frame) ReadI32() int32 {
 	val := int32(f.Code[f.PC])<<24 | int32(f.Code[f.PC+1])<<16 | int32(f.Code[f.PC+2])<<8 | int32(f.Code[f.PC+3])

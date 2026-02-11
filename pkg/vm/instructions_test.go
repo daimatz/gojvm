@@ -308,8 +308,12 @@ func TestDivisionByZero(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected ArithmeticException for idiv by zero, got nil")
 		}
-		if got := err.Error(); got != "ArithmeticException: / by zero" {
-			t.Errorf("error message: got %q, want %q", got, "ArithmeticException: / by zero")
+		javaExc, ok := err.(*JavaException)
+		if !ok {
+			t.Fatalf("expected *JavaException, got %T: %v", err, err)
+		}
+		if javaExc.Object.ClassName != "java/lang/ArithmeticException" {
+			t.Errorf("exception class: got %q, want %q", javaExc.Object.ClassName, "java/lang/ArithmeticException")
 		}
 	})
 

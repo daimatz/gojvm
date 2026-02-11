@@ -96,11 +96,25 @@ func (vm *VM) executeMethod(cf *classfile.ClassFile, method *classfile.MethodInf
 	// Execution loop
 	for frame.PC < len(frame.Code) {
 		opcode := frame.Code[frame.PC]
+		instructionPC := frame.PC
 		frame.PC++
 
 		retVal, hasReturn, err := vm.executeInstruction(frame, opcode)
 		if err != nil {
-			return Value{}, fmt.Errorf("in %s.%s:%s at PC=%d: %w", className, method.Name, method.Descriptor, frame.PC-1, err)
+			javaExc, isJavaExc := err.(*JavaException)
+			if !isJavaExc {
+				return Value{}, fmt.Errorf("in %s.%s:%s at PC=%d: %w", className, method.Name, method.Descriptor, instructionPC, err)
+			}
+			// Search exception table for matching handler
+			handler := vm.findExceptionHandler(method.Code, instructionPC, javaExc, cf)
+			if handler != nil {
+				frame.SP = 0
+				frame.Push(RefValue(javaExc.Object))
+				frame.PC = int(handler.HandlerPC)
+				continue
+			}
+			// No handler found, propagate
+			return Value{}, javaExc
 		}
 		if hasReturn {
 			return retVal, nil
@@ -300,6 +314,9 @@ func (vm *VM) ensureInitialized(className string) error {
 	if clinit != nil {
 		_, err := vm.executeMethod(cf, clinit, nil)
 		if err != nil {
+			if _, ok := err.(*JavaException); ok {
+				return err // JavaException はそのまま伝播
+			}
 			return fmt.Errorf("error in <clinit> of %s: %w", className, err)
 		}
 	}
@@ -351,8 +368,69 @@ func (vm *VM) setStaticField(className, fieldName string, val Value) {
 	vm.staticFields[className][fieldName] = val
 }
 
+// isInstanceOf checks whether objectClassName is an instance of targetClassName,
+// walking the superclass chain and recursively checking interfaces.
+func (vm *VM) isInstanceOf(objectClassName, targetClassName string) bool {
+	return vm.isInstanceOfWithVisited(objectClassName, targetClassName, make(map[string]bool))
+}
+
+func (vm *VM) isInstanceOfWithVisited(objectClassName, targetClassName string, visited map[string]bool) bool {
+	if objectClassName == targetClassName {
+		return true
+	}
+	if visited[objectClassName] {
+		return false
+	}
+	visited[objectClassName] = true
+	if vm.ClassLoader == nil {
+		return false
+	}
+	current := objectClassName
+	for current != "" {
+		cf, err := vm.ClassLoader.LoadClass(current)
+		if err != nil {
+			return false
+		}
+		// Check interfaces
+		for _, ifIdx := range cf.Interfaces {
+			ifName, err := classfile.GetClassName(cf.ConstantPool, ifIdx)
+			if err == nil && (ifName == targetClassName || vm.isInstanceOfWithVisited(ifName, targetClassName, visited)) {
+				return true
+			}
+		}
+		// Move to superclass
+		current = cf.SuperClassName()
+		if current == targetClassName {
+			return true
+		}
+	}
+	return false
+}
+
+// findExceptionHandler searches the exception table for a matching handler.
+func (vm *VM) findExceptionHandler(code *classfile.CodeAttribute, pc int, exc *JavaException, cf *classfile.ClassFile) *classfile.ExceptionHandler {
+	for i := range code.ExceptionHandlers {
+		h := &code.ExceptionHandlers[i]
+		if pc < int(h.StartPC) || pc >= int(h.EndPC) {
+			continue
+		}
+		if h.CatchType == 0 {
+			return h // catch-all (finally)
+		}
+		catchClassName, err := classfile.GetClassName(cf.ConstantPool, h.CatchType)
+		if err != nil {
+			continue
+		}
+		if vm.isInstanceOf(exc.Object.ClassName, catchClassName) {
+			return h
+		}
+	}
+	return nil
+}
+
 // resolveMethod resolves a method from its class name, walking up the class hierarchy.
 func (vm *VM) resolveMethod(className, methodName, descriptor string) (*classfile.ClassFile, *classfile.MethodInfo, error) {
+	// Walk superclass chain
 	current := className
 	for current != "" {
 		cf, err := vm.ClassLoader.LoadClass(current)
@@ -362,6 +440,25 @@ func (vm *VM) resolveMethod(className, methodName, descriptor string) (*classfil
 		method := cf.FindMethod(methodName, descriptor)
 		if method != nil {
 			return cf, method, nil
+		}
+		current = cf.SuperClassName()
+	}
+	// Walk superclass chain again, searching interfaces for default methods
+	current = className
+	for current != "" {
+		cf, err := vm.ClassLoader.LoadClass(current)
+		if err != nil {
+			break
+		}
+		for _, ifIdx := range cf.Interfaces {
+			ifName, err := classfile.GetClassName(cf.ConstantPool, ifIdx)
+			if err != nil {
+				continue
+			}
+			ifCf, ifMethod, err := vm.resolveMethod(ifName, methodName, descriptor)
+			if err == nil {
+				return ifCf, ifMethod, nil
+			}
 		}
 		current = cf.SuperClassName()
 	}
@@ -464,7 +561,7 @@ func (vm *VM) executeGetfield(frame *Frame) (Value, bool, error) {
 
 	objectRef := frame.Pop()
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
-		return Value{}, false, fmt.Errorf("getfield: NullPointerException")
+		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 	obj, ok := objectRef.Ref.(*JObject)
 	if !ok {
@@ -493,7 +590,7 @@ func (vm *VM) executePutfield(frame *Frame) (Value, bool, error) {
 	value := frame.Pop()
 	objectRef := frame.Pop()
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
-		return Value{}, false, fmt.Errorf("putfield: NullPointerException")
+		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 	obj, ok := objectRef.Ref.(*JObject)
 	if !ok {
@@ -534,7 +631,7 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 	}
 
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
-		return Value{}, false, fmt.Errorf("invokevirtual: NullPointerException calling %s.%s", methodRef.ClassName, methodRef.MethodName)
+		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 
 	// JObject method resolution via ClassLoader
@@ -720,7 +817,7 @@ func (vm *VM) executeInvokeinterface(frame *Frame) (Value, bool, error) {
 	objectRef := frame.Pop()
 
 	if objectRef.Type == TypeNull || objectRef.Ref == nil {
-		return Value{}, false, fmt.Errorf("invokeinterface: NullPointerException calling %s.%s:%s", methodRef.ClassName, methodRef.MethodName, methodRef.Descriptor)
+		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 
 	obj, ok := objectRef.Ref.(*JObject)
@@ -831,19 +928,19 @@ func (vm *VM) nativeArraycopy(args []Value) (Value, error) {
 	length := int(args[4].Int)
 
 	if srcRef.Type == TypeNull || destRef.Type == TypeNull {
-		return Value{}, fmt.Errorf("NullPointerException: arraycopy")
+		return Value{}, NewJavaException("java/lang/NullPointerException")
 	}
 
 	srcArr, ok1 := srcRef.Ref.(*JArray)
 	destArr, ok2 := destRef.Ref.(*JArray)
 	if !ok1 || !ok2 {
-		return Value{}, fmt.Errorf("ArrayStoreException: arraycopy")
+		return Value{}, NewJavaException("java/lang/ArrayStoreException")
 	}
 
 	if srcPos < 0 || destPos < 0 || length < 0 ||
 		srcPos+length > len(srcArr.Elements) ||
 		destPos+length > len(destArr.Elements) {
-		return Value{}, fmt.Errorf("ArrayIndexOutOfBoundsException: arraycopy")
+		return Value{}, NewJavaException("java/lang/ArrayIndexOutOfBoundsException")
 	}
 
 	for i := 0; i < length; i++ {

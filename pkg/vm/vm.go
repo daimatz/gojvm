@@ -1472,6 +1472,16 @@ func (vm *VM) valueToString(v Value) string {
 					return string(rune(val.Int))
 				}
 			}
+				// Try calling toString() via virtual dispatch
+			cf, m, err := vm.resolveMethod(obj.ClassName, "toString", "()Ljava/lang/String;")
+			if err == nil {
+				ret, err := vm.executeMethod(cf, m, []Value{v})
+				if err == nil {
+					if s, ok := extractGoString(ret); ok {
+						return s
+					}
+				}
+			}
 			return obj.ClassName
 		}
 		return fmt.Sprintf("%v", v.Ref)

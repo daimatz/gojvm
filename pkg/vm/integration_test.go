@@ -367,3 +367,35 @@ func TestExceptionChain(t *testing.T) {
 		t.Errorf("ExceptionChain output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestCharOps(t *testing.T) {
+	got := runClass(t, "../../testdata/CharOps.class")
+	want := "65\nB\nZ\nHello\n5\nW\n127\n32767\n0\n0\ntrue\ntrue\nx\n"
+	if got != want {
+		t.Errorf("CharOps output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestDefaultMethod(t *testing.T) {
+	got := runClass(t, "../../testdata/DefaultMethod.class")
+	want := "Hello, Alice!\nHELLO, ALICE!\n[LOG] test\nGood day, Bob.\nATTENTION: Bob\n"
+	if got != want {
+		t.Errorf("DefaultMethod output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestHashSetTest(t *testing.T) {
+	got := runClass(t, "../../testdata/HashSetTest.class")
+	want := "3\ntrue\nfalse\n2\napple\ncherry\n"
+	if got != want {
+		t.Errorf("HashSetTest output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestObjectMethods(t *testing.T) {
+	got := runClass(t, "../../testdata/ObjectMethods.class")
+	want := "(3,4)\n(1,2)\ntrue\nfalse\ntrue\n2\n(3,4)\n(1,2)\n"
+	if got != want {
+		t.Errorf("ObjectMethods output:\ngot  %q\nwant %q", got, want)
+	}
+}

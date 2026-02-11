@@ -667,6 +667,26 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokevirtual: receiver is not a JObject for method %s.%s", methodRef.ClassName, methodRef.MethodName)
 	}
 
+	// Lambda proxy dispatch
+	if obj.LambdaTarget != nil && methodRef.MethodName == obj.LambdaTarget.MethodName {
+		lt := obj.LambdaTarget
+		cf, method, err := vm.resolveMethod(lt.TargetClass, lt.TargetMethod, lt.TargetDesc)
+		if err != nil {
+			return Value{}, false, err
+		}
+		fullArgs := make([]Value, 0, len(lt.CapturedArgs)+len(args))
+		fullArgs = append(fullArgs, lt.CapturedArgs...)
+		fullArgs = append(fullArgs, args...)
+		retVal, err := vm.executeMethod(cf, method, fullArgs)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
+	}
+
 	cf, method, err := vm.resolveMethod(obj.ClassName, methodRef.MethodName, methodRef.Descriptor)
 	if err != nil {
 		return Value{}, false, err
@@ -916,6 +936,26 @@ func (vm *VM) executeInvokeinterface(frame *Frame) (Value, bool, error) {
 		return Value{}, false, fmt.Errorf("invokeinterface: receiver is not a JObject for %s.%s", methodRef.ClassName, methodRef.MethodName)
 	}
 
+	// Lambda proxy dispatch
+	if obj.LambdaTarget != nil && methodRef.MethodName == obj.LambdaTarget.MethodName {
+		lt := obj.LambdaTarget
+		cf, method, err := vm.resolveMethod(lt.TargetClass, lt.TargetMethod, lt.TargetDesc)
+		if err != nil {
+			return Value{}, false, err
+		}
+		fullArgs := make([]Value, 0, len(lt.CapturedArgs)+len(args))
+		fullArgs = append(fullArgs, lt.CapturedArgs...)
+		fullArgs = append(fullArgs, args...)
+		retVal, err := vm.executeMethod(cf, method, fullArgs)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
+	}
+
 	cf, method, err := vm.resolveMethod(obj.ClassName, methodRef.MethodName, methodRef.Descriptor)
 	if err != nil {
 		return Value{}, false, err
@@ -1042,6 +1082,222 @@ func formatDouble(d float64) string {
 		return strconv.FormatFloat(d, 'f', 1, 64)
 	}
 	return strconv.FormatFloat(d, 'f', -1, 64)
+}
+
+// executeInvokedynamic handles the invokedynamic instruction.
+func (vm *VM) executeInvokedynamic(frame *Frame) (Value, bool, error) {
+	index := frame.ReadU16()
+	_ = frame.ReadU8() // must be 0
+	_ = frame.ReadU8() // must be 0
+
+	pool := frame.Class.ConstantPool
+
+	// Resolve ConstantInvokeDynamic
+	invDyn, ok := pool[index].(*classfile.ConstantInvokeDynamic)
+	if !ok {
+		return Value{}, false, fmt.Errorf("invokedynamic: CP index %d is not InvokeDynamic", index)
+	}
+
+	// Get name and type
+	nat, ok := pool[invDyn.NameAndTypeIndex].(*classfile.ConstantNameAndType)
+	if !ok {
+		return Value{}, false, fmt.Errorf("invokedynamic: invalid NameAndType index")
+	}
+	methodName, _ := classfile.GetUtf8(pool, nat.NameIndex)
+	descriptor, _ := classfile.GetUtf8(pool, nat.DescriptorIndex)
+
+	// Get bootstrap method
+	bsmIdx := invDyn.BootstrapMethodAttrIndex
+	if int(bsmIdx) >= len(frame.Class.BootstrapMethods) {
+		return Value{}, false, fmt.Errorf("invokedynamic: bootstrap method index %d out of range", bsmIdx)
+	}
+	bsm := frame.Class.BootstrapMethods[bsmIdx]
+
+	// Get bootstrap method handle
+	mh, ok := pool[bsm.MethodRef].(*classfile.ConstantMethodHandle)
+	if !ok {
+		return Value{}, false, fmt.Errorf("invokedynamic: bootstrap method is not MethodHandle")
+	}
+
+	// Resolve bootstrap method class and name
+	var bsmClassName, bsmMethodName string
+	switch mh.ReferenceKind {
+	case 6: // REF_invokeStatic
+		mref, ok := pool[mh.ReferenceIndex].(*classfile.ConstantMethodref)
+		if !ok {
+			// Try InterfaceMethodref
+			imref, ok2 := pool[mh.ReferenceIndex].(*classfile.ConstantInterfaceMethodref)
+			if !ok2 {
+				return Value{}, false, fmt.Errorf("invokedynamic: cannot resolve bootstrap method ref")
+			}
+			bsmClassName, _ = classfile.GetClassName(pool, imref.ClassIndex)
+			bsmNat, _ := pool[imref.NameAndTypeIndex].(*classfile.ConstantNameAndType)
+			bsmMethodName, _ = classfile.GetUtf8(pool, bsmNat.NameIndex)
+		} else {
+			bsmClassName, _ = classfile.GetClassName(pool, mref.ClassIndex)
+			bsmNat, _ := pool[mref.NameAndTypeIndex].(*classfile.ConstantNameAndType)
+			bsmMethodName, _ = classfile.GetUtf8(pool, bsmNat.NameIndex)
+		}
+	default:
+		return Value{}, false, fmt.Errorf("invokedynamic: unsupported bootstrap method reference kind %d", mh.ReferenceKind)
+	}
+
+	bsmKey := bsmClassName + "." + bsmMethodName
+
+	switch bsmKey {
+	case "java/lang/invoke/LambdaMetafactory.metafactory":
+		return vm.handleLambdaMetafactory(frame, pool, bsm, methodName, descriptor)
+	case "java/lang/invoke/StringConcatFactory.makeConcatWithConstants":
+		return vm.handleStringConcatFactory(frame, pool, bsm, methodName, descriptor)
+	default:
+		return Value{}, false, fmt.Errorf("invokedynamic: unsupported bootstrap method %s", bsmKey)
+	}
+}
+
+// handleLambdaMetafactory handles LambdaMetafactory.metafactory bootstrap calls.
+func (vm *VM) handleLambdaMetafactory(frame *Frame, pool []classfile.ConstantPoolEntry, bsm classfile.BootstrapMethod, methodName, descriptor string) (Value, bool, error) {
+	if len(bsm.BootstrapArguments) < 3 {
+		return Value{}, false, fmt.Errorf("LambdaMetafactory: expected 3+ bootstrap args, got %d", len(bsm.BootstrapArguments))
+	}
+
+	// Get implementation method handle (arg[1])
+	implHandle, ok := pool[bsm.BootstrapArguments[1]].(*classfile.ConstantMethodHandle)
+	if !ok {
+		return Value{}, false, fmt.Errorf("LambdaMetafactory: arg[1] is not MethodHandle")
+	}
+
+	// Resolve implementation method
+	var targetClass, targetMethod, targetDesc string
+	switch implHandle.ReferenceKind {
+	case 5, 6, 7: // invokevirtual, invokestatic, invokespecial
+		mref, ok := pool[implHandle.ReferenceIndex].(*classfile.ConstantMethodref)
+		if ok {
+			targetClass, _ = classfile.GetClassName(pool, mref.ClassIndex)
+			implNat := pool[mref.NameAndTypeIndex].(*classfile.ConstantNameAndType)
+			targetMethod, _ = classfile.GetUtf8(pool, implNat.NameIndex)
+			targetDesc, _ = classfile.GetUtf8(pool, implNat.DescriptorIndex)
+		}
+	default:
+		return Value{}, false, fmt.Errorf("LambdaMetafactory: unsupported impl reference kind %d", implHandle.ReferenceKind)
+	}
+
+	// Get interface name from return type of factory descriptor
+	retStart := strings.Index(descriptor, ")L")
+	interfaceName := ""
+	if retStart != -1 {
+		retType := descriptor[retStart+2:]
+		interfaceName = strings.TrimSuffix(retType, ";")
+	}
+
+	// Pop captured args from stack (parameters of factory type)
+	capturedCount, _ := countParams(descriptor)
+	capturedArgs := make([]Value, capturedCount)
+	for i := capturedCount - 1; i >= 0; i-- {
+		capturedArgs[i] = frame.Pop()
+	}
+
+	// Create lambda proxy object
+	obj := &JObject{
+		ClassName: interfaceName,
+		Fields:    make(map[string]Value),
+		LambdaTarget: &LambdaTarget{
+			InterfaceName: interfaceName,
+			MethodName:    methodName,
+			TargetClass:   targetClass,
+			TargetMethod:  targetMethod,
+			TargetDesc:    targetDesc,
+			CapturedArgs:  capturedArgs,
+			ReferenceKind: implHandle.ReferenceKind,
+		},
+	}
+
+	frame.Push(RefValue(obj))
+	return Value{}, false, nil
+}
+
+// handleStringConcatFactory handles StringConcatFactory.makeConcatWithConstants bootstrap calls.
+func (vm *VM) handleStringConcatFactory(frame *Frame, pool []classfile.ConstantPoolEntry, bsm classfile.BootstrapMethod, methodName, descriptor string) (Value, bool, error) {
+	// Get recipe from bootstrap args[0] (ConstantString)
+	recipe := ""
+	if len(bsm.BootstrapArguments) > 0 {
+		argEntry := pool[bsm.BootstrapArguments[0]]
+		switch c := argEntry.(type) {
+		case *classfile.ConstantString:
+			recipe, _ = classfile.GetUtf8(pool, c.StringIndex)
+		}
+	}
+
+	// Count parameters from descriptor
+	paramCount, _ := countParams(descriptor)
+	args := make([]Value, paramCount)
+	for i := paramCount - 1; i >= 0; i-- {
+		args[i] = frame.Pop()
+	}
+
+	// Constants from bootstrap args [1:]
+	constants := make([]string, 0)
+	for i := 1; i < len(bsm.BootstrapArguments); i++ {
+		argEntry := pool[bsm.BootstrapArguments[i]]
+		switch c := argEntry.(type) {
+		case *classfile.ConstantString:
+			s, _ := classfile.GetUtf8(pool, c.StringIndex)
+			constants = append(constants, s)
+		case *classfile.ConstantInteger:
+			constants = append(constants, fmt.Sprintf("%d", c.Value))
+		default:
+			constants = append(constants, "")
+		}
+	}
+
+	// Build result string from recipe
+	// \x01 = argument placeholder, \x02 = constant placeholder
+	var result strings.Builder
+	argIdx := 0
+	constIdx := 0
+	for i := 0; i < len(recipe); i++ {
+		ch := recipe[i]
+		if ch == '\x01' {
+			if argIdx < len(args) {
+				result.WriteString(vm.valueToString(args[argIdx]))
+				argIdx++
+			}
+		} else if ch == '\x02' {
+			if constIdx < len(constants) {
+				result.WriteString(constants[constIdx])
+				constIdx++
+			}
+		} else {
+			result.WriteByte(ch)
+		}
+	}
+
+	frame.Push(RefValue(result.String()))
+	return Value{}, false, nil
+}
+
+// valueToString converts a Value to its string representation.
+func (vm *VM) valueToString(v Value) string {
+	switch v.Type {
+	case TypeInt:
+		return fmt.Sprintf("%d", v.Int)
+	case TypeLong:
+		return fmt.Sprintf("%d", v.Long)
+	case TypeFloat:
+		return fmt.Sprintf("%v", v.Float)
+	case TypeDouble:
+		return fmt.Sprintf("%v", v.Double)
+	case TypeNull:
+		return "null"
+	case TypeRef:
+		if s, ok := v.Ref.(string); ok {
+			return s
+		}
+		if obj, ok := v.Ref.(*JObject); ok {
+			return obj.ClassName
+		}
+		return fmt.Sprintf("%v", v.Ref)
+	}
+	return ""
 }
 
 // handleStringBuilder handles StringBuilder method calls natively.

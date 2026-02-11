@@ -143,3 +143,19 @@ func TestStringConcat(t *testing.T) {
 		t.Errorf("StringConcat output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestLambda(t *testing.T) {
+	got := runClass(t, "../../testdata/Lambda.class")
+	want := "7\n12\n"
+	if got != want {
+		t.Errorf("Lambda output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStringConcat2(t *testing.T) {
+	got := runClass(t, "../../testdata/StringConcat2.class")
+	want := "Hello World\nn=42\n"
+	if got != want {
+		t.Errorf("StringConcat2 output:\ngot  %q\nwant %q", got, want)
+	}
+}

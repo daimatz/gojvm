@@ -94,9 +94,9 @@ func Parse(r io.Reader) (*ClassFile, error) {
 		return nil, fmt.Errorf("parsing methods: %w", err)
 	}
 
-	// Class-level attributes (skip)
-	if err := skipAttributes(r); err != nil {
-		return nil, fmt.Errorf("skipping class attributes: %w", err)
+	// Class-level attributes (parse BootstrapMethods, skip others)
+	if err := cf.parseClassAttributes(r); err != nil {
+		return nil, fmt.Errorf("parsing class attributes: %w", err)
 	}
 
 	return cf, nil
@@ -269,7 +269,7 @@ func parseCodeAttribute(data []byte) (*CodeAttribute, error) {
 	}, nil
 }
 
-func skipAttributes(r io.Reader) error {
+func (cf *ClassFile) parseClassAttributes(r io.Reader) error {
 	var count uint16
 	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
 		return err
@@ -283,11 +283,49 @@ func skipAttributes(r io.Reader) error {
 		if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 			return err
 		}
-		if _, err := io.CopyN(io.Discard, r, int64(length)); err != nil {
+		data := make([]byte, length)
+		if _, err := io.ReadFull(r, data); err != nil {
 			return err
+		}
+		name, err := GetUtf8(cf.ConstantPool, nameIndex)
+		if err != nil {
+			continue // skip unknown attributes
+		}
+		if name == "BootstrapMethods" {
+			cf.BootstrapMethods, err = parseBootstrapMethods(data)
+			if err != nil {
+				return fmt.Errorf("parsing BootstrapMethods: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+func parseBootstrapMethods(data []byte) ([]BootstrapMethod, error) {
+	if len(data) < 2 {
+		return nil, fmt.Errorf("BootstrapMethods data too short")
+	}
+	numMethods := binary.BigEndian.Uint16(data[0:2])
+	offset := 2
+	methods := make([]BootstrapMethod, numMethods)
+	for i := uint16(0); i < numMethods; i++ {
+		if offset+4 > len(data) {
+			return nil, fmt.Errorf("BootstrapMethods truncated at method %d", i)
+		}
+		methodRef := binary.BigEndian.Uint16(data[offset : offset+2])
+		numArgs := binary.BigEndian.Uint16(data[offset+2 : offset+4])
+		offset += 4
+		args := make([]uint16, numArgs)
+		for j := uint16(0); j < numArgs; j++ {
+			if offset+2 > len(data) {
+				return nil, fmt.Errorf("BootstrapMethods truncated at arg %d of method %d", j, i)
+			}
+			args[j] = binary.BigEndian.Uint16(data[offset : offset+2])
+			offset += 2
+		}
+		methods[i] = BootstrapMethod{MethodRef: methodRef, BootstrapArguments: args}
+	}
+	return methods, nil
 }
 
 // ClassName returns the fully qualified name of this class.

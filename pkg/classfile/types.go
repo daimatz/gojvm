@@ -9,15 +9,16 @@ const (
 
 // ClassFile represents a parsed .class file.
 type ClassFile struct {
-	MinorVersion uint16
-	MajorVersion uint16
-	ConstantPool []ConstantPoolEntry
-	AccessFlags  uint16
-	ThisClass    uint16
-	SuperClass   uint16
-	Interfaces   []uint16
-	Fields       []FieldInfo
-	Methods      []MethodInfo
+	MinorVersion     uint16
+	MajorVersion     uint16
+	ConstantPool     []ConstantPoolEntry
+	AccessFlags      uint16
+	ThisClass        uint16
+	SuperClass       uint16
+	Interfaces       []uint16
+	Fields           []FieldInfo
+	Methods          []MethodInfo
+	BootstrapMethods []BootstrapMethod
 }
 
 // SuperClassName returns the fully qualified name of the super class.
@@ -107,6 +108,32 @@ type ConstantNameAndType struct {
 }
 
 func (c *ConstantNameAndType) Tag() uint8 { return TagNameAndType }
+
+type ConstantMethodHandle struct {
+	ReferenceKind  uint8
+	ReferenceIndex uint16
+}
+
+func (c *ConstantMethodHandle) Tag() uint8 { return TagMethodHandle }
+
+type ConstantMethodType struct {
+	DescriptorIndex uint16
+}
+
+func (c *ConstantMethodType) Tag() uint8 { return TagMethodType }
+
+type ConstantInvokeDynamic struct {
+	BootstrapMethodAttrIndex uint16
+	NameAndTypeIndex         uint16
+}
+
+func (c *ConstantInvokeDynamic) Tag() uint8 { return TagInvokeDynamic }
+
+// BootstrapMethod represents an entry in the BootstrapMethods attribute.
+type BootstrapMethod struct {
+	MethodRef          uint16   // CP index to ConstantMethodHandle
+	BootstrapArguments []uint16 // CP indices
+}
 
 // MethodInfo represents a method in a class file.
 type MethodInfo struct {

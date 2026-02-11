@@ -135,28 +135,32 @@ func parseConstantPool(r io.Reader, count uint16) ([]ConstantPoolEntry, error) {
 			pool[i] = &ConstantNameAndType{NameIndex: nameIndex, DescriptorIndex: descIndex}
 
 		case TagMethodHandle:
-			// reference_kind (u1) + reference_index (u2) = 3 bytes
-			skip := make([]byte, 3)
-			if _, err := io.ReadFull(r, skip); err != nil {
+			var refKind uint8
+			var refIndex uint16
+			if err := binary.Read(r, binary.BigEndian, &refKind); err != nil {
 				return nil, fmt.Errorf("reading MethodHandle at index %d: %w", i, err)
 			}
-			pool[i] = &constantPlaceholder{tag: tag}
+			if err := binary.Read(r, binary.BigEndian, &refIndex); err != nil {
+				return nil, fmt.Errorf("reading MethodHandle at index %d: %w", i, err)
+			}
+			pool[i] = &ConstantMethodHandle{ReferenceKind: refKind, ReferenceIndex: refIndex}
 
 		case TagMethodType:
-			// descriptor_index (u2) = 2 bytes
-			skip := make([]byte, 2)
-			if _, err := io.ReadFull(r, skip); err != nil {
+			var descIndex uint16
+			if err := binary.Read(r, binary.BigEndian, &descIndex); err != nil {
 				return nil, fmt.Errorf("reading MethodType at index %d: %w", i, err)
 			}
-			pool[i] = &constantPlaceholder{tag: tag}
+			pool[i] = &ConstantMethodType{DescriptorIndex: descIndex}
 
 		case TagDynamic, TagInvokeDynamic:
-			// bootstrap_method_attr_index (u2) + name_and_type_index (u2) = 4 bytes
-			skip := make([]byte, 4)
-			if _, err := io.ReadFull(r, skip); err != nil {
-				return nil, fmt.Errorf("reading Dynamic/InvokeDynamic at index %d: %w", i, err)
+			var bsmIndex, natIndex uint16
+			if err := binary.Read(r, binary.BigEndian, &bsmIndex); err != nil {
+				return nil, fmt.Errorf("reading InvokeDynamic at index %d: %w", i, err)
 			}
-			pool[i] = &constantPlaceholder{tag: tag}
+			if err := binary.Read(r, binary.BigEndian, &natIndex); err != nil {
+				return nil, fmt.Errorf("reading InvokeDynamic at index %d: %w", i, err)
+			}
+			pool[i] = &ConstantInvokeDynamic{BootstrapMethodAttrIndex: bsmIndex, NameAndTypeIndex: natIndex}
 
 		default:
 			return nil, fmt.Errorf("unknown constant pool tag %d at index %d", tag, i)

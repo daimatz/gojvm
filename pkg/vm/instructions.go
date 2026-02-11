@@ -196,6 +196,7 @@ const (
 	OpAthrow        = 0xBF
 	OpCheckcast     = 0xC0
 	OpInstanceof    = 0xC1
+	OpInvokedynamic   = 0xBA
 	OpIfnull        = 0xC6
 	OpIfnonnull     = 0xC7
 	OpGotoW         = 0xC8
@@ -968,6 +969,9 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 
 	case OpInvokeinterface:
 		return vm.executeInvokeinterface(frame)
+
+	case OpInvokedynamic:
+		return vm.executeInvokedynamic(frame)
 
 	case OpNew:
 		return vm.executeNew(frame)

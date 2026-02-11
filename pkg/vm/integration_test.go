@@ -119,3 +119,27 @@ func TestInterface(t *testing.T) {
 		t.Errorf("Interface output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestDoubleArith(t *testing.T) {
+	got := runClass(t, "../../testdata/DoubleArith.class")
+	want := "5\n1\n7\n1\n9\n42\n"
+	if got != want {
+		t.Errorf("DoubleArith output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestLongArith(t *testing.T) {
+	got := runClass(t, "../../testdata/LongArith.class")
+	want := "3000000000\n3000000000\n2000000000\n"
+	if got != want {
+		t.Errorf("LongArith output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStringConcat(t *testing.T) {
+	got := runClass(t, "../../testdata/StringConcat.class")
+	want := "Hello World\nx=42\n3+4=7\n"
+	if got != want {
+		t.Errorf("StringConcat output:\ngot  %q\nwant %q", got, want)
+	}
+}

@@ -13,17 +13,19 @@ const (
 	TypeInt ValueType = iota
 	TypeFloat
 	TypeLong
+	TypeDouble
 	TypeRef
 	TypeNull
 )
 
 // Value represents a value on the operand stack or in local variables.
 type Value struct {
-	Type  ValueType
-	Int   int32
-	Float float32
-	Long  int64
-	Ref   interface{}
+	Type   ValueType
+	Int    int32
+	Float  float32
+	Long   int64
+	Double float64
+	Ref    interface{}
 }
 
 // IntValue creates an integer Value.
@@ -39,6 +41,11 @@ func FloatValue(v float32) Value {
 // LongValue creates a long Value.
 func LongValue(v int64) Value {
 	return Value{Type: TypeLong, Long: v}
+}
+
+// DoubleValue creates a double Value.
+func DoubleValue(v float64) Value {
+	return Value{Type: TypeDouble, Double: v}
 }
 
 // RefValue creates a reference Value.

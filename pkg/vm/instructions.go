@@ -23,6 +23,8 @@ const (
 	OpFconst0    = 0x0B
 	OpFconst1    = 0x0C
 	OpFconst2    = 0x0D
+	OpDconst0    = 0x0E
+	OpDconst1    = 0x0F
 	OpBipush     = 0x10
 	OpSipush     = 0x11
 	OpLdc        = 0x12
@@ -31,6 +33,7 @@ const (
 	OpIload      = 0x15
 	OpLload      = 0x16
 	OpFload      = 0x17
+	OpDload      = 0x18
 	OpAload      = 0x19
 	OpIload0     = 0x1A
 	OpIload1     = 0x1B
@@ -44,17 +47,26 @@ const (
 	OpFload1     = 0x23
 	OpFload2     = 0x24
 	OpFload3     = 0x25
+	OpDload0     = 0x26
+	OpDload1     = 0x27
+	OpDload2     = 0x28
+	OpDload3     = 0x29
 	OpAload0     = 0x2A
 	OpAload1     = 0x2B
 	OpAload2     = 0x2C
 	OpAload3     = 0x2D
 	OpIaload     = 0x2E
+	OpLaload     = 0x2F
+	OpFaload     = 0x30
+	OpDaload     = 0x31
 	OpAaload     = 0x32
 	OpBaload     = 0x33
 	OpCaload     = 0x34
+	OpSaload     = 0x35
 	OpIstore     = 0x36
 	OpLstore     = 0x37
 	OpFstore     = 0x38
+	OpDstore     = 0x39
 	OpAstore     = 0x3A
 	OpIstore0    = 0x3B
 	OpIstore1    = 0x3C
@@ -68,14 +80,22 @@ const (
 	OpFstore1    = 0x44
 	OpFstore2    = 0x45
 	OpFstore3    = 0x46
+	OpDstore0    = 0x47
+	OpDstore1    = 0x48
+	OpDstore2    = 0x49
+	OpDstore3    = 0x4A
 	OpAstore0    = 0x4B
 	OpAstore1    = 0x4C
 	OpAstore2    = 0x4D
 	OpAstore3    = 0x4E
 	OpIastore    = 0x4F
+	OpLastore    = 0x50
+	OpFastore    = 0x51
+	OpDastore    = 0x52
 	OpAastore    = 0x53
 	OpBastore    = 0x54
 	OpCastore    = 0x55
+	OpSastore    = 0x56
 	OpPop        = 0x57
 	OpDup        = 0x59
 	OpDupX1      = 0x5A
@@ -83,13 +103,28 @@ const (
 	OpSwap       = 0x5F
 	OpIadd       = 0x60
 	OpLadd       = 0x61
+	OpFadd       = 0x62
+	OpDadd       = 0x63
 	OpIsub       = 0x64
 	OpLsub       = 0x65
+	OpFsub       = 0x66
+	OpDsub       = 0x67
 	OpImul       = 0x68
+	OpLmul       = 0x69
 	OpFmul       = 0x6A
+	OpDmul       = 0x6B
 	OpIdiv       = 0x6C
+	OpLdiv       = 0x6D
+	OpFdiv       = 0x6E
+	OpDdiv       = 0x6F
 	OpIrem       = 0x70
+	OpLrem       = 0x71
+	OpFrem       = 0x72
+	OpDrem       = 0x73
 	OpIneg       = 0x74
+	OpLneg       = 0x75
+	OpFneg       = 0x76
+	OpDneg       = 0x77
 	OpIshl       = 0x78
 	OpLshl       = 0x79
 	OpIshr       = 0x7A
@@ -105,13 +140,24 @@ const (
 	OpIinc       = 0x84
 	OpI2l        = 0x85
 	OpI2f        = 0x86
+	OpI2d        = 0x87
 	OpL2i        = 0x88
+	OpL2f        = 0x89
+	OpL2d        = 0x8A
 	OpF2i        = 0x8B
+	OpF2l        = 0x8C
+	OpF2d        = 0x8D
+	OpD2i        = 0x8E
+	OpD2l        = 0x8F
+	OpD2f        = 0x90
 	OpI2b        = 0x91
+	OpI2c        = 0x92
 	OpI2s        = 0x93
 	OpLcmp       = 0x94
 	OpFcmpl      = 0x95
 	OpFcmpg      = 0x96
+	OpDcmpl      = 0x97
+	OpDcmpg      = 0x98
 	OpIfeq       = 0x99
 	OpIfne       = 0x9A
 	OpIflt       = 0x9B
@@ -132,6 +178,7 @@ const (
 	OpIreturn    = 0xAC
 	OpLreturn    = 0xAD
 	OpFreturn    = 0xAE
+	OpDreturn    = 0xAF
 	OpAreturn    = 0xB0
 	OpReturn     = 0xB1
 	OpGetstatic  = 0xB2
@@ -192,6 +239,11 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 	case OpFconst2:
 		frame.Push(FloatValue(2.0))
 
+	case OpDconst0:
+		frame.Push(DoubleValue(0.0))
+	case OpDconst1:
+		frame.Push(DoubleValue(1.0))
+
 	case OpBipush:
 		val := frame.ReadI8()
 		frame.Push(IntValue(int32(val)))
@@ -218,7 +270,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		case *classfile.ConstantLong:
 			frame.Push(LongValue(c.Value))
 		case *classfile.ConstantDouble:
-			frame.Push(FloatValue(float32(c.Value))) // simplified: treat double as float
+			frame.Push(DoubleValue(c.Value))
 		default:
 			return Value{}, false, fmt.Errorf("ldc2_w: unsupported type at index %d", index)
 		}
@@ -260,6 +312,18 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 	case OpFload3:
 		frame.Push(frame.GetLocal(3))
 
+	case OpDload:
+		index := frame.ReadU8()
+		frame.Push(frame.GetLocal(int(index)))
+	case OpDload0:
+		frame.Push(frame.GetLocal(0))
+	case OpDload1:
+		frame.Push(frame.GetLocal(1))
+	case OpDload2:
+		frame.Push(frame.GetLocal(2))
+	case OpDload3:
+		frame.Push(frame.GetLocal(3))
+
 	case OpAload:
 		index := frame.ReadU8()
 		frame.Push(frame.GetLocal(int(index)))
@@ -273,7 +337,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.Push(frame.GetLocal(3))
 
 	// --- Array load ---
-	case OpIaload, OpBaload, OpCaload:
+	case OpIaload, OpBaload, OpCaload, OpLaload, OpFaload, OpDaload, OpSaload:
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
 		if arrRef.Type == TypeNull || arrRef.Ref == nil {
@@ -340,6 +404,18 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 	case OpFstore3:
 		frame.SetLocal(3, frame.Pop())
 
+	case OpDstore:
+		index := frame.ReadU8()
+		frame.SetLocal(int(index), frame.Pop())
+	case OpDstore0:
+		frame.SetLocal(0, frame.Pop())
+	case OpDstore1:
+		frame.SetLocal(1, frame.Pop())
+	case OpDstore2:
+		frame.SetLocal(2, frame.Pop())
+	case OpDstore3:
+		frame.SetLocal(3, frame.Pop())
+
 	case OpAstore:
 		index := frame.ReadU8()
 		frame.SetLocal(int(index), frame.Pop())
@@ -353,7 +429,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.SetLocal(3, frame.Pop())
 
 	// --- Array store ---
-	case OpIastore, OpBastore, OpCastore:
+	case OpIastore, OpBastore, OpCastore, OpLastore, OpFastore, OpDastore, OpSastore:
 		value := frame.Pop()
 		index := frame.Pop().Int
 		arrRef := frame.Pop()
@@ -427,6 +503,16 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		v1 := frame.Pop()
 		frame.Push(LongValue(v1.Long + v2.Long))
 
+	case OpFadd:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(FloatValue(v1.Float + v2.Float))
+
+	case OpDadd:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(DoubleValue(v1.Double + v2.Double))
+
 	case OpIsub:
 		v2 := frame.Pop()
 		v1 := frame.Pop()
@@ -437,15 +523,35 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		v1 := frame.Pop()
 		frame.Push(LongValue(v1.Long - v2.Long))
 
+	case OpFsub:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(FloatValue(v1.Float - v2.Float))
+
+	case OpDsub:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(DoubleValue(v1.Double - v2.Double))
+
 	case OpImul:
 		v2 := frame.Pop()
 		v1 := frame.Pop()
 		frame.Push(IntValue(v1.Int * v2.Int))
 
+	case OpLmul:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(LongValue(v1.Long * v2.Long))
+
 	case OpFmul:
 		v2 := frame.Pop()
 		v1 := frame.Pop()
 		frame.Push(FloatValue(v1.Float * v2.Float))
+
+	case OpDmul:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(DoubleValue(v1.Double * v2.Double))
 
 	case OpIdiv:
 		v2 := frame.Pop()
@@ -455,6 +561,24 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		}
 		frame.Push(IntValue(v1.Int / v2.Int))
 
+	case OpLdiv:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		if v2.Long == 0 {
+			return Value{}, false, NewJavaException("java/lang/ArithmeticException")
+		}
+		frame.Push(LongValue(v1.Long / v2.Long))
+
+	case OpFdiv:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(FloatValue(v1.Float / v2.Float))
+
+	case OpDdiv:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(DoubleValue(v1.Double / v2.Double))
+
 	case OpIrem:
 		v2 := frame.Pop()
 		v1 := frame.Pop()
@@ -463,9 +587,39 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		}
 		frame.Push(IntValue(v1.Int % v2.Int))
 
+	case OpLrem:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		if v2.Long == 0 {
+			return Value{}, false, NewJavaException("java/lang/ArithmeticException")
+		}
+		frame.Push(LongValue(v1.Long % v2.Long))
+
+	case OpFrem:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(FloatValue(float32(math.Remainder(float64(v1.Float), float64(v2.Float)))))
+
+	case OpDrem:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		frame.Push(DoubleValue(math.Remainder(v1.Double, v2.Double)))
+
 	case OpIneg:
 		v := frame.Pop()
 		frame.Push(IntValue(-v.Int))
+
+	case OpLneg:
+		v := frame.Pop()
+		frame.Push(LongValue(-v.Long))
+
+	case OpFneg:
+		v := frame.Pop()
+		frame.Push(FloatValue(-v.Float))
+
+	case OpDneg:
+		v := frame.Pop()
+		frame.Push(DoubleValue(-v.Double))
 
 	// --- Bit operations ---
 	case OpIshl:
@@ -543,9 +697,21 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		v := frame.Pop()
 		frame.Push(FloatValue(float32(v.Int)))
 
+	case OpI2d:
+		v := frame.Pop()
+		frame.Push(DoubleValue(float64(v.Int)))
+
 	case OpL2i:
 		v := frame.Pop()
 		frame.Push(IntValue(int32(v.Long)))
+
+	case OpL2f:
+		v := frame.Pop()
+		frame.Push(FloatValue(float32(v.Long)))
+
+	case OpL2d:
+		v := frame.Pop()
+		frame.Push(DoubleValue(float64(v.Long)))
 
 	case OpF2i:
 		v := frame.Pop()
@@ -555,9 +721,45 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 			frame.Push(IntValue(int32(v.Float)))
 		}
 
+	case OpF2l:
+		v := frame.Pop()
+		if math.IsNaN(float64(v.Float)) {
+			frame.Push(LongValue(0))
+		} else {
+			frame.Push(LongValue(int64(v.Float)))
+		}
+
+	case OpF2d:
+		v := frame.Pop()
+		frame.Push(DoubleValue(float64(v.Float)))
+
+	case OpD2i:
+		v := frame.Pop()
+		if math.IsNaN(v.Double) {
+			frame.Push(IntValue(0))
+		} else {
+			frame.Push(IntValue(int32(v.Double)))
+		}
+
+	case OpD2l:
+		v := frame.Pop()
+		if math.IsNaN(v.Double) {
+			frame.Push(LongValue(0))
+		} else {
+			frame.Push(LongValue(int64(v.Double)))
+		}
+
+	case OpD2f:
+		v := frame.Pop()
+		frame.Push(FloatValue(float32(v.Double)))
+
 	case OpI2b:
 		v := frame.Pop()
 		frame.Push(IntValue(int32(int8(v.Int))))
+
+	case OpI2c:
+		v := frame.Pop()
+		frame.Push(IntValue(int32(uint16(v.Int))))
 
 	case OpI2s:
 		v := frame.Pop()
@@ -596,6 +798,32 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		} else if v1.Float > v2.Float {
 			frame.Push(IntValue(1))
 		} else if v1.Float < v2.Float {
+			frame.Push(IntValue(-1))
+		} else {
+			frame.Push(IntValue(0))
+		}
+
+	case OpDcmpl:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		if math.IsNaN(v1.Double) || math.IsNaN(v2.Double) {
+			frame.Push(IntValue(-1))
+		} else if v1.Double > v2.Double {
+			frame.Push(IntValue(1))
+		} else if v1.Double < v2.Double {
+			frame.Push(IntValue(-1))
+		} else {
+			frame.Push(IntValue(0))
+		}
+
+	case OpDcmpg:
+		v2 := frame.Pop()
+		v1 := frame.Pop()
+		if math.IsNaN(v1.Double) || math.IsNaN(v2.Double) {
+			frame.Push(IntValue(1))
+		} else if v1.Double > v2.Double {
+			frame.Push(IntValue(1))
+		} else if v1.Double < v2.Double {
 			frame.Push(IntValue(-1))
 		} else {
 			frame.Push(IntValue(0))
@@ -710,7 +938,7 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		}
 
 	// --- Return ---
-	case OpIreturn, OpFreturn, OpAreturn, OpLreturn:
+	case OpIreturn, OpFreturn, OpAreturn, OpLreturn, OpDreturn:
 		return frame.Pop(), true, nil
 
 	case OpReturn:

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/daimatz/gojvm/pkg/classfile"
@@ -177,6 +178,18 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 
 	case "java/lang/Float.floatToRawIntBits:(F)I":
 		return IntValue(int32(math.Float32bits(args[0].Float))), nil
+
+	case "java/lang/Double.doubleToRawLongBits:(D)J":
+		return LongValue(int64(math.Float64bits(args[0].Double))), nil
+
+	case "java/lang/Double.longBitsToDouble:(J)D":
+		return DoubleValue(math.Float64frombits(uint64(args[0].Long))), nil
+
+	case "java/lang/Math.sqrt:(D)D":
+		return DoubleValue(math.Sqrt(args[0].Double)), nil
+
+	case "java/lang/Math.pow:(DD)D":
+		return DoubleValue(math.Pow(args[0].Double, args[1].Double)), nil
 
 	case "java/lang/System.registerNatives:()V",
 		"java/lang/Object.registerNatives:()V",
@@ -353,6 +366,8 @@ func defaultValueForDescriptor(descriptor string) Value {
 		return NullValue()
 	case 'F':
 		return FloatValue(0)
+	case 'D':
+		return DoubleValue(0)
 	case 'J':
 		return LongValue(0)
 	default:
@@ -634,6 +649,18 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		return Value{}, false, NewJavaException("java/lang/NullPointerException")
 	}
 
+	// StringBuilder native handling
+	if obj, ok := objectRef.Ref.(*JObject); ok && obj.ClassName == "java/lang/StringBuilder" {
+		retVal, _, err := vm.handleStringBuilder(objectRef, methodRef.MethodName, methodRef.Descriptor, args)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(retVal)
+		}
+		return Value{}, false, nil
+	}
+
 	// JObject method resolution via ClassLoader
 	obj, ok := objectRef.Ref.(*JObject)
 	if !ok {
@@ -664,13 +691,31 @@ func (vm *VM) handlePrintStream(frame *Frame, ps *native.PrintStream, methodName
 		switch descriptor {
 		case "(I)V":
 			ps.Println(args[0].Int)
+		case "(J)V":
+			ps.Println(args[0].Long)
+		case "(D)V":
+			d := args[0].Double
+			if d == float64(int64(d)) && !math.IsInf(d, 0) {
+				fmt.Fprintf(ps.Writer, "%s\n", strconv.FormatFloat(d, 'f', 1, 64))
+			} else {
+				fmt.Fprintf(ps.Writer, "%s\n", strconv.FormatFloat(d, 'f', -1, 64))
+			}
+		case "(F)V":
+			fmt.Fprintf(ps.Writer, "%v\n", args[0].Float)
+		case "(Z)V":
+			if args[0].Int != 0 {
+				ps.Println("true")
+			} else {
+				ps.Println("false")
+			}
+		case "(C)V":
+			fmt.Fprintf(ps.Writer, "%c\n", rune(args[0].Int))
 		case "(Ljava/lang/String;)V":
 			ps.Println(args[0].Ref)
 		case "(Ljava/lang/Object;)V":
 			if args[0].Type == TypeNull {
 				ps.Println("null")
 			} else if obj, ok := args[0].Ref.(*JObject); ok {
-				// Try to call toString or use a reasonable default
 				val, exists := obj.Fields["value"]
 				if exists {
 					ps.Println(val.Int)
@@ -691,6 +736,25 @@ func (vm *VM) handlePrintStream(frame *Frame, ps *native.PrintStream, methodName
 		switch descriptor {
 		case "(I)V":
 			fmt.Fprintf(ps.Writer, "%d", args[0].Int)
+		case "(J)V":
+			fmt.Fprintf(ps.Writer, "%d", args[0].Long)
+		case "(D)V":
+			d := args[0].Double
+			if d == float64(int64(d)) && !math.IsInf(d, 0) {
+				fmt.Fprintf(ps.Writer, "%s", strconv.FormatFloat(d, 'f', 1, 64))
+			} else {
+				fmt.Fprintf(ps.Writer, "%s", strconv.FormatFloat(d, 'f', -1, 64))
+			}
+		case "(F)V":
+			fmt.Fprintf(ps.Writer, "%v", args[0].Float)
+		case "(C)V":
+			fmt.Fprintf(ps.Writer, "%c", rune(args[0].Int))
+		case "(Z)V":
+			if args[0].Int != 0 {
+				fmt.Fprintf(ps.Writer, "true")
+			} else {
+				fmt.Fprintf(ps.Writer, "false")
+			}
 		case "(Ljava/lang/String;)V":
 			fmt.Fprintf(ps.Writer, "%v", args[0].Ref)
 		default:
@@ -724,6 +788,21 @@ func (vm *VM) executeInvokespecial(frame *Frame) (Value, bool, error) {
 
 	// Object.<init> is a no-op
 	if methodRef.ClassName == "java/lang/Object" && methodRef.MethodName == "<init>" {
+		return Value{}, false, nil
+	}
+
+	// StringBuilder native handling
+	if methodRef.ClassName == "java/lang/StringBuilder" ||
+		(objectRef.Ref != nil && func() bool {
+			if o, ok := objectRef.Ref.(*JObject); ok {
+				return o.ClassName == "java/lang/StringBuilder"
+			}
+			return false
+		}()) {
+		_, _, err := vm.handleStringBuilder(objectRef, methodRef.MethodName, methodRef.Descriptor, args)
+		if err != nil {
+			return Value{}, false, err
+		}
 		return Value{}, false, nil
 	}
 
@@ -870,6 +949,9 @@ func (vm *VM) executeNew(frame *Frame) (Value, bool, error) {
 	}
 
 	obj := &JObject{ClassName: className, Fields: make(map[string]Value)}
+	if className == "java/lang/StringBuilder" {
+		obj.Fields["_buffer"] = RefValue("")
+	}
 	frame.Push(RefValue(obj))
 	return Value{}, false, nil
 }
@@ -952,4 +1034,82 @@ func (vm *VM) nativeArraycopy(args []Value) (Value, error) {
 // isVoidReturn checks if a method descriptor has void return type.
 func isVoidReturn(descriptor string) bool {
 	return strings.HasSuffix(descriptor, ")V")
+}
+
+// formatDouble formats a double value matching Java's Double.toString behavior.
+func formatDouble(d float64) string {
+	if d == float64(int64(d)) && !math.IsInf(d, 0) {
+		return strconv.FormatFloat(d, 'f', 1, 64)
+	}
+	return strconv.FormatFloat(d, 'f', -1, 64)
+}
+
+// handleStringBuilder handles StringBuilder method calls natively.
+func (vm *VM) handleStringBuilder(objectRef Value, methodName, descriptor string, args []Value) (Value, bool, error) {
+	obj := objectRef.Ref.(*JObject)
+	buf, _ := obj.Fields["_buffer"].Ref.(string)
+
+	switch methodName {
+	case "<init>":
+		switch descriptor {
+		case "()V":
+			// already initialized
+		case "(Ljava/lang/String;)V":
+			if s, ok := args[0].Ref.(string); ok {
+				obj.Fields["_buffer"] = RefValue(s)
+			}
+		case "(I)V":
+			// capacity hint, ignore
+		}
+		return Value{}, false, nil
+
+	case "append":
+		var appendStr string
+		switch descriptor {
+		case "(Ljava/lang/String;)Ljava/lang/StringBuilder;":
+			if args[0].Type == TypeNull {
+				appendStr = "null"
+			} else if s, ok := args[0].Ref.(string); ok {
+				appendStr = s
+			} else {
+				appendStr = fmt.Sprintf("%v", args[0].Ref)
+			}
+		case "(I)Ljava/lang/StringBuilder;":
+			appendStr = fmt.Sprintf("%d", args[0].Int)
+		case "(J)Ljava/lang/StringBuilder;":
+			appendStr = fmt.Sprintf("%d", args[0].Long)
+		case "(D)Ljava/lang/StringBuilder;":
+			appendStr = formatDouble(args[0].Double)
+		case "(F)Ljava/lang/StringBuilder;":
+			appendStr = fmt.Sprintf("%v", args[0].Float)
+		case "(C)Ljava/lang/StringBuilder;":
+			appendStr = string(rune(args[0].Int))
+		case "(Z)Ljava/lang/StringBuilder;":
+			if args[0].Int != 0 {
+				appendStr = "true"
+			} else {
+				appendStr = "false"
+			}
+		case "(Ljava/lang/Object;)Ljava/lang/StringBuilder;":
+			if args[0].Type == TypeNull {
+				appendStr = "null"
+			} else if s, ok := args[0].Ref.(string); ok {
+				appendStr = s
+			} else if o, ok := args[0].Ref.(*JObject); ok {
+				appendStr = o.ClassName
+			} else {
+				appendStr = fmt.Sprintf("%v", args[0].Ref)
+			}
+		}
+		obj.Fields["_buffer"] = RefValue(buf + appendStr)
+		return objectRef, false, nil
+
+	case "toString":
+		return RefValue(buf), false, nil
+
+	case "length":
+		return IntValue(int32(len(buf))), false, nil
+	}
+
+	return Value{}, false, fmt.Errorf("StringBuilder: unsupported method %s:%s", methodName, descriptor)
 }

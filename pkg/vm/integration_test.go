@@ -271,3 +271,35 @@ func TestStackTrace(t *testing.T) {
 		t.Errorf("StackTrace output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestGenericClass(t *testing.T) {
+	got := runClass(t, "../../testdata/GenericClass.class")
+	want := "hello\n42\n(hello, 42)\ndefault\n30\n"
+	if got != want {
+		t.Errorf("GenericClass output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestTryWithResources(t *testing.T) {
+	got := runClass(t, "../../testdata/TryWithResources.class")
+	want := "open A\nuse A\nclose A\ndone\n"
+	if got != want {
+		t.Errorf("TryWithResources output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestStringFormat(t *testing.T) {
+	got := runClass(t, "../../testdata/StringFormat.class")
+	want := "x=42\npi=3.14\nHello World!\ntrue\nA\n100\n123\n456\n2147483647\n"
+	if got != want {
+		t.Errorf("StringFormat output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestNestedLoop(t *testing.T) {
+	got := runClass(t, "../../testdata/NestedLoop.class")
+	want := "19\n22\n43\n50\napple:3\nbanana:2\ncherry:1\n"
+	if got != want {
+		t.Errorf("NestedLoop output:\ngot  %q\nwant %q", got, want)
+	}
+}

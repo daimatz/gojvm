@@ -684,8 +684,8 @@ func (vm *VM) executeInvokevirtual(frame *Frame) (Value, bool, error) {
 		}
 	}
 
-	// Handle String methods natively (strings are stored as Go string, not JObject)
-	if str, ok := objectRef.Ref.(string); ok {
+	// Handle String methods natively (strings may be Go string or JDK String JObject)
+	if str, ok := extractGoString(objectRef); ok {
 		retVal, err := vm.handleStringMethod(str, methodRef.MethodName, methodRef.Descriptor, args)
 		if err != nil {
 			return Value{}, false, err
@@ -787,20 +787,13 @@ func (vm *VM) handlePrintStream(frame *Frame, ps *native.PrintStream, methodName
 		case "(C)V":
 			fmt.Fprintf(ps.Writer, "%c\n", rune(args[0].Int))
 		case "(Ljava/lang/String;)V":
-			ps.Println(args[0].Ref)
-		case "(Ljava/lang/Object;)V":
-			if args[0].Type == TypeNull {
-				ps.Println("null")
-			} else if obj, ok := args[0].Ref.(*JObject); ok {
-				val, exists := obj.Fields["value"]
-				if exists {
-					ps.Println(val.Int)
-				} else {
-					ps.Println(obj.ClassName)
-				}
+			if s, ok := extractGoString(args[0]); ok {
+				ps.Println(s)
 			} else {
 				ps.Println(args[0].Ref)
 			}
+		case "(Ljava/lang/Object;)V":
+			ps.Println(vm.valueToString(args[0]))
 		case "()V":
 			ps.Println()
 		default:
@@ -832,7 +825,13 @@ func (vm *VM) handlePrintStream(frame *Frame, ps *native.PrintStream, methodName
 				fmt.Fprintf(ps.Writer, "false")
 			}
 		case "(Ljava/lang/String;)V":
-			fmt.Fprintf(ps.Writer, "%v", args[0].Ref)
+			if s, ok := extractGoString(args[0]); ok {
+				fmt.Fprintf(ps.Writer, "%s", s)
+			} else {
+				fmt.Fprintf(ps.Writer, "%v", args[0].Ref)
+			}
+		case "(Ljava/lang/Object;)V":
+			fmt.Fprintf(ps.Writer, "%s", vm.valueToString(args[0]))
 		default:
 			return Value{}, false, fmt.Errorf("invokevirtual: unsupported print descriptor %s", descriptor)
 		}
@@ -1036,7 +1035,7 @@ func (vm *VM) executeInvokeinterface(frame *Frame) (Value, bool, error) {
 	}
 
 	// Handle String methods natively via interface dispatch
-	if str, isStr := objectRef.Ref.(string); isStr {
+	if str, isStr := extractGoString(objectRef); isStr {
 		retVal, err := vm.handleStringMethod(str, methodRef.MethodName, methodRef.Descriptor, args)
 		if err != nil {
 			return Value{}, false, err
@@ -1392,6 +1391,42 @@ func (vm *VM) handleStringConcatFactory(frame *Frame, pool []classfile.ConstantP
 }
 
 // valueToString converts a Value to its string representation.
+// extractGoString extracts a Go string from a Value that may be either
+// a Go string or a JDK String JObject (with byte[] value and coder fields).
+func extractGoString(v Value) (string, bool) {
+	if s, ok := v.Ref.(string); ok {
+		return s, true
+	}
+	if obj, ok := v.Ref.(*JObject); ok && obj.ClassName == "java/lang/String" {
+		valField, ok := obj.Fields["value"]
+		if !ok {
+			return "", true
+		}
+		arr, ok := valField.Ref.(*JArray)
+		if !ok {
+			return "", true
+		}
+		coder := obj.Fields["coder"].Int // 0=LATIN1, 1=UTF16
+		if coder == 0 {
+			bytes := make([]byte, len(arr.Elements))
+			for i, e := range arr.Elements {
+				bytes[i] = byte(e.Int)
+			}
+			return string(bytes), true
+		}
+		// UTF16: two bytes per character
+		n := len(arr.Elements) / 2
+		runes := make([]rune, n)
+		for i := 0; i < n; i++ {
+			lo := arr.Elements[i*2].Int & 0xFF
+			hi := arr.Elements[i*2+1].Int & 0xFF
+			runes[i] = rune(lo | (hi << 8))
+		}
+		return string(runes), true
+	}
+	return "", false
+}
+
 func (vm *VM) valueToString(v Value) string {
 	switch v.Type {
 	case TypeInt:
@@ -1405,7 +1440,7 @@ func (vm *VM) valueToString(v Value) string {
 	case TypeNull:
 		return "null"
 	case TypeRef:
-		if s, ok := v.Ref.(string); ok {
+		if s, ok := extractGoString(v); ok {
 			return s
 		}
 		if obj, ok := v.Ref.(*JObject); ok {

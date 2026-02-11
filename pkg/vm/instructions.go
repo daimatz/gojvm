@@ -100,6 +100,8 @@ const (
 	OpDup        = 0x59
 	OpDupX1      = 0x5A
 	OpDupX2      = 0x5B
+	OpDup2       = 0x5C
+	OpPop2       = 0x58
 	OpSwap       = 0x5F
 	OpIadd       = 0x60
 	OpLadd       = 0x61
@@ -489,6 +491,18 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.Push(v3)
 		frame.Push(v2)
 		frame.Push(v1)
+
+	case OpDup2:
+		v1 := frame.Pop()
+		v2 := frame.Pop()
+		frame.Push(v2)
+		frame.Push(v1)
+		frame.Push(v2)
+		frame.Push(v1)
+
+	case OpPop2:
+		frame.Pop()
+		frame.Pop()
 
 	case OpSwap:
 		v2 := frame.Pop()

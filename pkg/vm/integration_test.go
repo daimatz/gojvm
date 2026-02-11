@@ -199,3 +199,35 @@ func TestArrayListTest(t *testing.T) {
 		t.Errorf("ArrayListTest output:\ngot  %q\nwant %q", got, want)
 	}
 }
+
+func TestStaticInit(t *testing.T) {
+	got := runClass(t, "../../testdata/StaticInit.class")
+	want := "10\nhello\n11\n12\n12\n"
+	if got != want {
+		t.Errorf("StaticInit output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestMultiArray(t *testing.T) {
+	got := runClass(t, "../../testdata/MultiArray.class")
+	want := "1\n5\n9\n3\n4\n20\n50\n"
+	if got != want {
+		t.Errorf("MultiArray output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestTypeCasting(t *testing.T) {
+	got := runClass(t, "../../testdata/TypeCasting.class")
+	want := "Woof\ntrue\nfalse\ntrue\nfetching\nString: hello\nDog: Rex\nCat: Whiskers\n"
+	if got != want {
+		t.Errorf("TypeCasting output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestHashMapIteration(t *testing.T) {
+	got := runClass(t, "../../testdata/HashMapIteration.class")
+	want := "3\n85\ntrue\nfalse\nAlice=90\nBob=85\nCharlie=95\n"
+	if got != want {
+		t.Errorf("HashMapIteration output:\ngot  %q\nwant %q", got, want)
+	}
+}

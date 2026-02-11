@@ -198,10 +198,11 @@ const (
 	OpInstanceof    = 0xC1
 	OpMonitorenter  = 0xC2
 	OpMonitorexit   = 0xC3
-	OpInvokedynamic   = 0xBA
-	OpIfnull        = 0xC6
-	OpIfnonnull     = 0xC7
-	OpGotoW         = 0xC8
+	OpInvokedynamic     = 0xBA
+	OpMultianewarray   = 0xC5
+	OpIfnull           = 0xC6
+	OpIfnonnull        = 0xC7
+	OpGotoW            = 0xC8
 )
 
 // executeInstruction executes a single bytecode instruction.
@@ -1037,6 +1038,10 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		if val.Type != TypeNull {
 			if className[0] == '[' {
 				// array checkcast - pass through for now
+			} else if _, ok := val.Ref.(string); ok {
+				if className != "java/lang/String" && className != "java/lang/Object" && className != "java/lang/Comparable" && className != "java/io/Serializable" && className != "java/lang/CharSequence" {
+					return Value{}, false, NewJavaException("java/lang/ClassCastException")
+				}
 			} else if obj, ok := val.Ref.(*JObject); ok {
 				if !vm.isInstanceOf(obj.ClassName, className) {
 					return Value{}, false, NewJavaException("java/lang/ClassCastException")
@@ -1054,6 +1059,8 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		ref := frame.Pop()
 		if ref.Type == TypeNull {
 			frame.Push(IntValue(0))
+		} else if _, ok := ref.Ref.(string); ok && (className == "java/lang/String" || className == "java/lang/Object" || className == "java/lang/Comparable" || className == "java/io/Serializable" || className == "java/lang/CharSequence") {
+			frame.Push(IntValue(1))
 		} else if obj, ok := ref.Ref.(*JObject); ok && vm.isInstanceOf(obj.ClassName, className) {
 			frame.Push(IntValue(1))
 		} else {
@@ -1064,6 +1071,16 @@ func (vm *VM) executeInstruction(frame *Frame, opcode byte) (Value, bool, error)
 		frame.Pop() // pop object reference, no-op for single-threaded
 	case OpMonitorexit:
 		frame.Pop() // pop object reference, no-op for single-threaded
+
+	case OpMultianewarray:
+		_ = frame.ReadU16() // constant pool index (array class name)
+		dims := int(frame.ReadU8())
+		sizes := make([]int, dims)
+		for i := dims - 1; i >= 0; i-- {
+			sizes[i] = int(frame.Pop().Int)
+		}
+		arr := createMultiArray(sizes, 0)
+		frame.Push(RefValue(arr))
 
 	case OpIfnull:
 		branchPC := frame.PC - 1
@@ -1110,4 +1127,16 @@ func (vm *VM) executeBranchBinary(frame *Frame, cond func(int32, int32) bool) (V
 		frame.PC = branchPC + int(offset)
 	}
 	return Value{}, false, nil
+}
+
+// createMultiArray recursively creates a multi-dimensional JArray.
+func createMultiArray(sizes []int, depth int) *JArray {
+	size := sizes[depth]
+	arr := &JArray{Elements: make([]Value, size)}
+	if depth+1 < len(sizes) {
+		for i := 0; i < size; i++ {
+			arr.Elements[i] = RefValue(createMultiArray(sizes, depth+1))
+		}
+	}
+	return arr
 }

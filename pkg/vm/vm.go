@@ -176,6 +176,9 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 		"jdk/internal/misc/CDS.isSharingEnabled0:()Z":
 		return IntValue(0), nil
 
+	case "jdk/internal/misc/CDS.getRandomSeedForDumping:()J":
+		return LongValue(0), nil
+
 	case "java/lang/Float.floatToRawIntBits:(F)I":
 		return IntValue(int32(math.Float32bits(args[0].Float))), nil
 
@@ -261,6 +264,9 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 	case "java/lang/Runtime.maxMemory:()J":
 		return LongValue(256 * 1024 * 1024), nil
 
+	case "java/lang/System.nanoTime:()J":
+		return LongValue(0), nil
+
 	case "jdk/internal/misc/Unsafe.compareAndSetInt:(Ljava/lang/Object;JII)Z":
 		return IntValue(1), nil // pretend CAS always succeeds
 
@@ -287,6 +293,18 @@ func (vm *VM) executeNativeMethod(className, methodName, descriptor string, args
 
 	case "java/lang/Class.isAssignableFrom:(Ljava/lang/Class;)Z":
 		return IntValue(1), nil
+
+	case "jdk/internal/reflect/Reflection.getCallerClass:()Ljava/lang/Class;":
+		classObj := &JObject{
+			ClassName: "java/lang/Class",
+			Fields:    map[string]Value{"name": RefValue("java/lang/Object")},
+		}
+		return RefValue(classObj), nil
+
+	case "java/lang/reflect/Array.newArray:(Ljava/lang/Class;I)Ljava/lang/Object;":
+		length := int(args[1].Int)
+		arr := &JArray{Elements: make([]Value, length)}
+		return RefValue(arr), nil
 	}
 
 	// registerNatives pattern
@@ -875,7 +893,11 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 
 	methodRef, err := classfile.ResolveMethodref(pool, index)
 	if err != nil {
-		return Value{}, false, fmt.Errorf("invokestatic: %w", err)
+		// Some JDK classes use InterfaceMethodref for invokestatic
+		methodRef, err = classfile.ResolveInterfaceMethodref(pool, index)
+		if err != nil {
+			return Value{}, false, fmt.Errorf("invokestatic: %w", err)
+		}
 	}
 
 	if err := vm.ensureInitialized(methodRef.ClassName); err != nil {
@@ -892,6 +914,52 @@ func (vm *VM) executeInvokestatic(frame *Frame) (Value, bool, error) {
 	args := make([]Value, paramCount)
 	for i := paramCount - 1; i >= 0; i-- {
 		args[i] = frame.Pop()
+	}
+
+	// Handle AccessController.doPrivileged natively — just call action.run()
+	if methodRef.ClassName == "java/security/AccessController" && methodRef.MethodName == "doPrivileged" {
+		// args[0] is the PrivilegedAction; call its run() method
+		action := args[0]
+		if action.Type == TypeNull || action.Ref == nil {
+			return Value{}, false, NewJavaException("java/lang/NullPointerException")
+		}
+		if obj, ok := action.Ref.(*JObject); ok && obj.LambdaTarget != nil {
+			lt := obj.LambdaTarget
+			cf2, method2, err2 := vm.resolveMethod(lt.TargetClass, lt.TargetMethod, lt.TargetDesc)
+			if err2 != nil {
+				return Value{}, false, err2
+			}
+			fullArgs := make([]Value, 0, len(lt.CapturedArgs))
+			fullArgs = append(fullArgs, lt.CapturedArgs...)
+			retVal, err2 := vm.executeMethod(cf2, method2, fullArgs)
+			if err2 != nil {
+				return Value{}, false, err2
+			}
+			if !isVoidReturn(methodRef.Descriptor) {
+				frame.Push(retVal)
+			}
+			return Value{}, false, nil
+		}
+		// Non-lambda PrivilegedAction: call run() via interface dispatch
+		if obj, ok := action.Ref.(*JObject); ok {
+			cf2, method2, err2 := vm.resolveMethod(obj.ClassName, "run", "()Ljava/lang/Object;")
+			if err2 != nil {
+				return Value{}, false, err2
+			}
+			retVal, err2 := vm.executeMethod(cf2, method2, []Value{action})
+			if err2 != nil {
+				return Value{}, false, err2
+			}
+			if !isVoidReturn(methodRef.Descriptor) {
+				frame.Push(retVal)
+			}
+			return Value{}, false, nil
+		}
+		// Fallback: return null
+		if !isVoidReturn(methodRef.Descriptor) {
+			frame.Push(NullValue())
+		}
+		return Value{}, false, nil
 	}
 
 	// Handle String.valueOf natively
@@ -1326,6 +1394,25 @@ func (vm *VM) valueToString(v Value) string {
 			return s
 		}
 		if obj, ok := v.Ref.(*JObject); ok {
+			if val, exists := obj.Fields["value"]; exists {
+				switch obj.ClassName {
+				case "java/lang/Integer", "java/lang/Short", "java/lang/Byte":
+					return fmt.Sprintf("%d", val.Int)
+				case "java/lang/Long":
+					return fmt.Sprintf("%d", val.Long)
+				case "java/lang/Float":
+					return fmt.Sprintf("%v", val.Float)
+				case "java/lang/Double":
+					return formatDouble(val.Double)
+				case "java/lang/Boolean":
+					if val.Int != 0 {
+						return "true"
+					}
+					return "false"
+				case "java/lang/Character":
+					return string(rune(val.Int))
+				}
+			}
 			return obj.ClassName
 		}
 		return fmt.Sprintf("%v", v.Ref)
@@ -1380,15 +1467,7 @@ func (vm *VM) handleStringBuilder(objectRef Value, methodName, descriptor string
 				appendStr = "false"
 			}
 		case "(Ljava/lang/Object;)Ljava/lang/StringBuilder;":
-			if args[0].Type == TypeNull {
-				appendStr = "null"
-			} else if s, ok := args[0].Ref.(string); ok {
-				appendStr = s
-			} else if o, ok := args[0].Ref.(*JObject); ok {
-				appendStr = o.ClassName
-			} else {
-				appendStr = fmt.Sprintf("%v", args[0].Ref)
-			}
+			appendStr = vm.valueToString(args[0])
 		}
 		obj.Fields["_buffer"] = RefValue(buf + appendStr)
 		return objectRef, false, nil
